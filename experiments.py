@@ -1,77 +1,75 @@
-# %% Experiment 0: checking if manopt is installed correctly - running simple example
+# %% Experiment 1: PSD Matrices
 import autograd.numpy as anp
-import pymanopt
-
-anp.random.seed(42)
-
-dim = 3
-manifold = pymanopt.manifolds.Sphere(dim)
-
-matrix = anp.random.normal(size=(dim, dim))
-matrix = 0.5 * (matrix + matrix.T)
-
-@pymanopt.function.autograd(manifold)
-def cost(point):
-    return -point @ matrix @ point
-
-problem = pymanopt.Problem(manifold, cost)
-
-optimizer = pymanopt.optimizers.SteepestDescent()
-result = optimizer.run(problem)
-
-eigenvalues, eigenvectors = anp.linalg.eig(matrix)
-dominant_eigenvector = eigenvectors[:, eigenvalues.argmax()]
-
-print("Dominant eigenvector:", dominant_eigenvector)
-print("Pymanopt solution:", result.point)
-
-# %% Experiment 1: PSD matrices
 from pymanopt.manifolds import SymmetricPositiveDefinite
+import numpy as np
+from src.RiemannianProximalBundle import RProximalBundle
 
+# %%
 # set the manifold a priori
-dim = 3
+dim = 50
 manifold = SymmetricPositiveDefinite(dim)
 
-samples = 10 
-# generate |samples| random PSD matrices
+# generate true median
+true_median = manifold.random_point()
+# generate random PSD matrices to take median of
+num_of_perturbations = 100
 data = []
-for _ in range(samples):
-    data_point = manifold.random_point()
-    data.append(data_point)
+for _ in range(num_of_perturbations):
+    random_tangent_vector = manifold.random_tangent_vector(true_median)
+    ranndom_scale = np.random.uniform(0.5, 10)
+    random_tangent_vector *= ranndom_scale
+    perturbation_1 = manifold.exp(true_median, random_tangent_vector)
+    perturbation_2 = manifold.exp(true_median, -random_tangent_vector)
+    data.append(perturbation_1)
+    data.append(perturbation_2)
 
+# %% Setting up functions
 # Riemannian median cost function
-def cost(point, data):
+def cost_set_up(point, data):
     # riemannian median cost function given points
 
     return sum([manifold.dist(point, x) for x in data]) / len(data)
 
+def cost(point):
+    # compute the cost function
+    return cost_set_up(point, data)
+
+# Riemannian subgradient operator
+def subgradient_set_up(point, data):
+    # compute the Riemannian subgradient of the cost function
+    grad = anp.zeros_like(point)
+    for x in data:
+        log_point = manifold.log(point, x)
+        grad += - (log_point)/ manifold.norm(point, log_point)
+    return grad / len(data)
+
+def subgradient(point):
+    # compute the subgradient
+    return subgradient_set_up(point, data)
+
+# %% Initialize points and set up the optimizer
+# Initialize a random point on the manifold
+initial_point = manifold.random_point()
+initial_objective = cost(initial_point)
+initial_subgradient = subgradient(initial_point)
+true_objective = cost(true_median)
+
+# Set up the optimizer
+optimizer = RProximalBundle(
+    manifold=manifold,
+    retraction_map = manifold.exp,
+    transport_map = manifold.transport,
+    objective_function=cost,
+    subgradient = subgradient, true_min_obj=true_objective,
+    initial_point=initial_point,
+    initial_objective=initial_objective,
+    initial_subgradient=initial_subgradient,
+    trust_parameter=0.2,
+    transport_error =0.5,
+    retraction_error= 1,
+)
 # %%
-
-print("Data shape:", len(data), data[0].shape)
-# check if the matrices are PSD
-for i, matrix in enumerate(data):
-    eigenvalues, _ = anp.linalg.eig(matrix)
-    print(f"Matrix {i} eigenvalues:", eigenvalues)
-    assert all(eigenvalues >= 0), f"Matrix {i} is not PSD"
-
-# print matrices
-for i, matrix in enumerate(data):
-    print(f"Matrix {i}:\n", matrix)
-
+optimizer.run()
 # %%
-point_a, point_b = data[0], data[1]
-
-dist_ab = manifold.dist(point_a, point_b)
-print("Distance between point_a and point_b:", dist_ab)
-# %%
-
-
-# %%
-# create a random point on the manifold
-point = manifold.random_point()
-print("Random point on manifold:", point)
-
-objective = cost(point,data)
-print("Objective value:", objective)
-
+optimizer.plot_objective_versus_iter()
 # %%
