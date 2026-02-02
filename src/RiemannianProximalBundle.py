@@ -10,7 +10,7 @@ class RProximalBundle(object):
     def __init__(self, manifold, retraction_map, transport_map, objective_function, 
                  subgradient, initial_point, initial_objective, initial_subgradient, true_min_obj = 0, retraction_error = 0,
                  transport_error = 0, sectional_curvature = -0.5, proximal_parameter = 0.02,
-                 trust_parameter = 0.1,
+                 trust_parameter = 0.05,
                  max_iter = 200, tolerance = 1e-12, adaptive_proximal = False, know_minimizer = True, relative_error = True):
 
 
@@ -72,6 +72,9 @@ class RProximalBundle(object):
         self.indices_of_descent_steps = []
         self.indices_of_null_steps = []
         self.indices_of_proximal_doubling_steps = []
+        # Store intermediate points for animation (every 5 iterations)
+        self.intermediate_points = [initial_point.copy()]
+        self.intermediate_iterations = [0]
         
 
     def run(self):
@@ -108,7 +111,7 @@ class RProximalBundle(object):
             # compute the model's predicted objective gap versus the true objective gap
             ratio = self.model_versus_true(candidate_objective, model_objective, current_objective)
 
-            # Be more permissive: accept if ratio is good AND we're not going significantly uphill
+            # Accept Rule
             if ratio > self.trust_parameter: # DESCENT STEP
                 self.current_proximal_center = candidate_point # moves model
                 self.proximal_center_history.append(candidate_point) # stores the new proximal center
@@ -166,6 +169,11 @@ class RProximalBundle(object):
             self.relative_objective_history.append((current_proximal_objective - self.true_min_obj) / (self.initial_objective - self.true_min_obj))
             self.objective_history.append(current_proximal_objective - self.true_min_obj)
             self.raw_objective_history.append(current_proximal_objective)
+
+            # Store intermediate points for animation every 5 iterations
+            if i % 5 == 0:
+                self.intermediate_points.append(self.current_proximal_center.copy())
+                self.intermediate_iterations.append(i)
         
             # check for convergence
             if self.know_minimizer:

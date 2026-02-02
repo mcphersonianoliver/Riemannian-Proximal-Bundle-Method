@@ -694,6 +694,9 @@ class RiemannianSubgradientMethod:
         self.subgradient_norm_history = []
         self.best_point = initial_point.copy()
         self.best_objective = objective_function(initial_point)
+        # Store intermediate points for animation (every 5 iterations)
+        self.intermediate_points = [initial_point.copy()]
+        self.intermediate_iterations = [0]
 
         logger.info(f"SGM initialized: step_size={step_size}, max_iter={max_iter}, tolerance={tolerance}")
 
@@ -750,6 +753,11 @@ class RiemannianSubgradientMethod:
             # Store step size (constant in this implementation)
             self.step_size_history.append(self.step_size)
 
+            # Store intermediate points for animation every 5 iterations
+            if (iteration + 1) % 5 == 0:
+                self.intermediate_points.append(self.current_point.copy())
+                self.intermediate_iterations.append(iteration + 1)
+
             # Log progress every 50 iterations
             if (iteration + 1) % 50 == 0:
                 if self.true_min_obj is not None:
@@ -779,7 +787,9 @@ class RiemannianSubgradientMethod:
             plt.title(f'SGM: Objective vs Iteration{title_suffix}')
             plt.ylabel('Objective Value')
         plt.xlabel('Iteration Number')
-        plt.yscale('log')
+        # Only use log scale if all values are positive
+        if all(v > 0 for v in self.objective_history):
+            plt.yscale('log')
         plt.grid(True, alpha=0.3)
         plt.legend()
 
@@ -790,7 +800,9 @@ class RiemannianSubgradientMethod:
         plt.title(f'SGM: Subgradient Norm vs Iteration{title_suffix}')
         plt.xlabel('Iteration Number')
         plt.ylabel('Subgradient Norm')
-        plt.yscale('log')
+        # Only use log scale if all values are positive (subgradient norms should be non-negative)
+        if all(v > 0 for v in self.subgradient_norm_history):
+            plt.yscale('log')
         plt.grid(True, alpha=0.3)
         plt.legend()
 
@@ -864,6 +876,9 @@ class RiemannianSubgradientMethodDecayingStepSize:
         self.subgradient_norm_history = []
         self.best_point = initial_point.copy()
         self.best_objective = objective_function(initial_point)
+        # Store intermediate points for animation (every 5 iterations)
+        self.intermediate_points = [initial_point.copy()]
+        self.intermediate_iterations = [0]
 
         logger.info(f"SGM (decaying) initialized: initial_step_size={initial_step_size}, max_iter={max_iter}, tolerance={tolerance}")
 
@@ -921,6 +936,11 @@ class RiemannianSubgradientMethodDecayingStepSize:
                 self.best_objective = current_obj
                 self.best_point = self.current_point.copy()
 
+            # Store intermediate points for animation every 5 iterations
+            if (iteration + 1) % 5 == 0:
+                self.intermediate_points.append(self.current_point.copy())
+                self.intermediate_iterations.append(iteration + 1)
+
             # Log progress every 50 iterations
             if (iteration + 1) % 50 == 0:
                 if self.true_min_obj is not None:
@@ -950,7 +970,9 @@ class RiemannianSubgradientMethodDecayingStepSize:
             plt.title(f'SGM Decaying: Objective vs Iteration{title_suffix}')
             plt.ylabel('Objective Value')
         plt.xlabel('Iteration Number')
-        plt.yscale('log')
+        # Only use log scale if all values are positive
+        if all(v > 0 for v in self.objective_history):
+            plt.yscale('log')
         plt.grid(True, alpha=0.3)
         plt.legend()
 
@@ -961,7 +983,9 @@ class RiemannianSubgradientMethodDecayingStepSize:
         plt.title(f'SGM Decaying: Subgradient Norm vs Iteration{title_suffix}')
         plt.xlabel('Iteration Number')
         plt.ylabel('Subgradient Norm')
-        plt.yscale('log')
+        # Only use log scale if all values are positive (subgradient norms should be non-negative)
+        if all(v > 0 for v in self.subgradient_norm_history):
+            plt.yscale('log')
         plt.grid(True, alpha=0.3)
         plt.legend()
 
@@ -972,7 +996,9 @@ class RiemannianSubgradientMethodDecayingStepSize:
         plt.title(f'SGM Decaying: Step Size vs Iteration{title_suffix}')
         plt.xlabel('Iteration Number')
         plt.ylabel('Step Size')
-        plt.yscale('log')
+        # Only use log scale if all values are positive (step sizes should be positive)
+        if all(v > 0 for v in self.step_size_history):
+            plt.yscale('log')
         plt.grid(True, alpha=0.3)
         plt.legend()
 
@@ -1002,7 +1028,7 @@ print("Using same problem setup and manifold wrappers as RProximalBundle experim
 print("\nEXPERIMENT 1: SGM with different step sizes")
 print("-" * 70)
 
-step_sizes = [0.001, 0.005, 0.01, 0.05]
+step_sizes = [0.001, 0.005, 0.01, 0.05, 0.5, 1.0]
 sgm_results = {}
 
 # Also test decaying step size variant
@@ -1129,25 +1155,37 @@ iterations_rpb = range(len(rpb_algorithm_phase2.objective_history))
 plt.plot(iterations_rpb, rpb_algorithm_phase2.objective_history, 'b-', linewidth=2.5, label='RProximalBundle', alpha=0.8)
 
 # SGM with different step sizes
-colors_constant = ['red', 'green', 'orange', 'purple']
+colors_constant = ['red', 'green', 'orange', 'purple', 'brown', 'gray', 'cyan']
 for i, step_size in enumerate(step_sizes):
     sgm_alg = sgm_results[step_size]['algorithm']
     iterations_sgm = range(len(sgm_alg.objective_history))
-    plt.plot(iterations_sgm, sgm_alg.objective_history, color=colors_constant[i], linestyle='--',
+    color_idx = i % len(colors_constant)  # Safe indexing
+    plt.plot(iterations_sgm, sgm_alg.objective_history, color=colors_constant[color_idx], linestyle='--',
              linewidth=1.5, label=f'SGM const (step={step_size})', alpha=0.7)
 
 # SGM with decaying step sizes
-colors_decaying = ['darkred', 'darkgreen', 'darkorange']
+colors_decaying = ['darkred', 'darkgreen', 'darkorange', 'darkblue', 'darkmagenta']
 for i, initial_step_size in enumerate(decaying_initial_step_sizes):
     sgm_decaying_alg = sgm_decaying_results[initial_step_size]['algorithm']
     iterations_sgm_decaying = range(len(sgm_decaying_alg.objective_history))
-    plt.plot(iterations_sgm_decaying, sgm_decaying_alg.objective_history, color=colors_decaying[i], linestyle=':',
+    color_idx = i % len(colors_decaying)  # Safe indexing
+    plt.plot(iterations_sgm_decaying, sgm_decaying_alg.objective_history, color=colors_decaying[color_idx], linestyle=':',
              linewidth=1.5, label=f'SGM decay (init={initial_step_size})', alpha=0.7)
 
 plt.title('Objective Gap Comparison: RProximalBundle vs SGM')
 plt.xlabel('Iteration Number')
 plt.ylabel('Objective Gap')
-plt.yscale('log')
+# Only use log scale if all values are positive
+all_values = []
+all_values.extend(rpb_algorithm_phase2.objective_history)
+for step_size in step_sizes:
+    sgm_alg = sgm_results[step_size]['algorithm']
+    all_values.extend(sgm_alg.objective_history)
+for initial_step_size in decaying_initial_step_sizes:
+    sgm_decaying_alg = sgm_decaying_results[initial_step_size]['algorithm']
+    all_values.extend(sgm_decaying_alg.objective_history)
+if all(v > 0 for v in all_values):
+    plt.yscale('log')
 plt.grid(True, alpha=0.3)
 plt.legend()
 
@@ -1155,7 +1193,8 @@ plt.legend()
 plt.subplot(2, 3, 2)
 methods = ['RProximalBundle'] + [f'SGM const ({s})' for s in step_sizes] + [f'SGM decay ({s})' for s in decaying_initial_step_sizes]
 final_objectives = [rpb_algorithm_phase2.raw_objective_history[-1]] + [sgm_results[s]['final_objective'] for s in step_sizes] + [sgm_decaying_results[s]['final_objective'] for s in decaying_initial_step_sizes]
-colors_bar = ['blue'] + colors_constant + colors_decaying
+# Create colors_bar with safe indexing to match the number of methods
+colors_bar = ['blue'] + [colors_constant[i % len(colors_constant)] for i in range(len(step_sizes))] + [colors_decaying[i % len(colors_decaying)] for i in range(len(decaying_initial_step_sizes))]
 
 bars = plt.bar(methods, final_objectives, color=colors_bar, alpha=0.7)
 plt.title('Final Objective Values Comparison')
@@ -1176,7 +1215,15 @@ plt.plot(range(len(overall_best_sgm.objective_history)), overall_best_sgm.object
 plt.title('Convergence Rate Comparison (Log-Log)')
 plt.xlabel('Iteration Number')
 plt.ylabel('Objective Gap')
-plt.loglog()
+# Only use log-log scale if all values are positive
+rpb_values = rpb_algorithm_phase2.objective_history
+sgm_values = overall_best_sgm.objective_history
+if all(v > 0 for v in rpb_values) and all(v > 0 for v in sgm_values):
+    plt.loglog()
+else:
+    # Use regular linear scale if negative values present
+    plt.yscale('linear')
+    plt.xscale('linear')
 plt.grid(True, alpha=0.3)
 plt.legend()
 
@@ -1381,6 +1428,276 @@ print("="*70)
 logger.info("SGM experiments and comparison with RProximalBundle completed successfully")
 
 # Display all plots
+plt.show()
+
+# %%
+
+# =============================================================================
+# FOUR-WAY COMPARISON: BUNDLE METHOD, SGM CONSTANT (1.0), SGM CONSTANT (0.5), SGM DECAYING
+# =============================================================================
+
+print("\n" + "="*70)
+print("FOUR-WAY COMPARISON: BUNDLE METHOD vs SGM CONSTANT (1.0) vs SGM CONSTANT (0.5) vs SGM DECAYING")
+print("="*70 + "\n")
+logger.info("Starting four-way comparison: Bundle Method, SGM constant (stepsize=1), SGM constant (stepsize=0.5), SGM decaying")
+
+# Extract the specific algorithms we want to compare
+rpb_method = rpb_algorithm_phase2
+sgm_constant_1 = sgm_results[1.0]['algorithm']  # SGM with constant stepsize = 1.0
+sgm_constant_05 = sgm_results[0.5]['algorithm']  # SGM with constant stepsize = 0.5
+sgm_decaying_1 = sgm_decaying_results[1.0]['algorithm']  # SGM with decaying stepsize starting at 1
+
+print("Selected methods for four-way comparison:")
+print(f"1. Riemannian Proximal Bundle Method - Final objective: {rpb_method.raw_objective_history[-1]:.8f}")
+print(f"2. SGM Constant (stepsize=1.0) - Final objective: {sgm_constant_1.best_objective:.8f}")
+print(f"3. SGM Constant (stepsize=0.5) - Final objective: {sgm_constant_05.best_objective:.8f}")
+print(f"4. SGM Decaying (initial=1, schedule=1/sqrt(k+1)) - Final objective: {sgm_decaying_1.best_objective:.8f}")
+
+def create_four_way_comparison_plot(problem, rpb_alg, sgm_const_1_alg, sgm_const_05_alg, sgm_decay_alg, save_path=None):
+    """Create a comprehensive four-way comparison plot."""
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    # Top-left: Bundle Method reconstruction
+    axes[0, 0].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.7)
+    axes[0, 0].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightblue', s=8, alpha=0.5, label='Noisy Signal')
+    axes[0, 0].plot(rpb_alg.current_proximal_center[:, 0], rpb_alg.current_proximal_center[:, 1],
+                    'purple', linewidth=2, label='Bundle Method')
+    axes[0, 0].set_title('Bundle Method Reconstruction')
+    axes[0, 0].set_xlabel('x coordinate')
+    axes[0, 0].set_ylabel('y coordinate')
+    axes[0, 0].legend(loc='upper left')
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].axis('equal')
+
+    # Top-right: SGM Constant (step=1.0) reconstruction
+    axes[0, 1].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.7)
+    axes[0, 1].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightblue', s=8, alpha=0.5, label='Noisy Signal')
+    axes[0, 1].plot(sgm_const_1_alg.best_point[:, 0], sgm_const_1_alg.best_point[:, 1],
+                    'blue', linewidth=2, label='SGM Constant (step=1.0)')
+    axes[0, 1].set_title('SGM Constant (stepsize=1.0) Reconstruction')
+    axes[0, 1].set_xlabel('x coordinate')
+    axes[0, 1].set_ylabel('y coordinate')
+    axes[0, 1].legend(loc='upper left')
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].axis('equal')
+
+    # Bottom-left: SGM Constant (step=0.5) reconstruction
+    axes[1, 0].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.7)
+    axes[1, 0].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightblue', s=8, alpha=0.5, label='Noisy Signal')
+    axes[1, 0].plot(sgm_const_05_alg.best_point[:, 0], sgm_const_05_alg.best_point[:, 1],
+                    'green', linewidth=2, label='SGM Constant (step=0.5)')
+    axes[1, 0].set_title('SGM Constant (stepsize=0.5) Reconstruction')
+    axes[1, 0].set_xlabel('x coordinate')
+    axes[1, 0].set_ylabel('y coordinate')
+    axes[1, 0].legend(loc='upper left')
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].axis('equal')
+
+    # Bottom-right: SGM Decaying reconstruction
+    axes[1, 1].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.7)
+    axes[1, 1].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightblue', s=8, alpha=0.5, label='Noisy Signal')
+    axes[1, 1].plot(sgm_decay_alg.best_point[:, 0], sgm_decay_alg.best_point[:, 1],
+                    'red', linewidth=2, label='SGM Decaying (1/√(k+1))')
+    axes[1, 1].set_title('SGM Decaying (initial=1, 1/√(k+1)) Reconstruction')
+    axes[1, 1].set_xlabel('x coordinate')
+    axes[1, 1].set_ylabel('y coordinate')
+    axes[1, 1].legend(loc='upper left')
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].axis('equal')
+
+    # All four signal reconstructions are now shown in the 2x2 grid
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"✓ Four-way comparison plot saved as '{save_path}'")
+        logger.info(f"Four-way comparison plot saved as '{save_path}'")
+
+    return fig
+
+def create_four_way_animated_gif(problem, rpb_alg, sgm_const_1_alg, sgm_const_05_alg, sgm_decay_alg, save_path='four_way_comparison.gif', fps=8):
+    """Create an animated GIF showing the actual signal evolution every 5 iterations for four methods."""
+    print(f"Creating animated four-way signal evolution GIF comparison...")
+    logger.info(f"Creating animated four-way signal evolution GIF comparison with {fps} fps")
+
+    # Import animation tools
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    # Create figure with 2x2 layout for the four methods
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Determine animation frames based on all algorithms' intermediate points (every 5 iterations)
+    max_frames = max(len(rpb_alg.intermediate_points), len(sgm_const_1_alg.intermediate_points),
+                     len(sgm_const_05_alg.intermediate_points), len(sgm_decay_alg.intermediate_points))
+
+    def animate(frame_idx):
+        # Clear all axes
+        for ax_row in axes:
+            for ax in ax_row:
+                ax.clear()
+
+        # Note: iteration numbers are stored in intermediate_iterations arrays for each algorithm
+
+        # Plot 1: Bundle Method (top-left) - show actual intermediate signals
+        axes[0, 0].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.8)
+        axes[0, 0].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightgray', s=8, alpha=0.5, label='Noisy Signal')
+
+        if frame_idx < len(rpb_alg.intermediate_points):
+            current_signal = rpb_alg.intermediate_points[frame_idx]
+            axes[0, 0].plot(current_signal[:, 0], current_signal[:, 1],
+                        'purple', linewidth=2, alpha=0.9, label='Bundle Method')
+            actual_iter = rpb_alg.intermediate_iterations[frame_idx]
+            axes[0, 0].set_title(f'Bundle Method (Iter {actual_iter})')
+        else:
+            # Show final result if we've run out of intermediate points
+            axes[0, 0].plot(rpb_alg.current_proximal_center[:, 0], rpb_alg.current_proximal_center[:, 1],
+                        'purple', linewidth=2, alpha=0.9, label='Bundle Method')
+            axes[0, 0].set_title(f'Bundle Method (Final)')
+
+        axes[0, 0].set_xlabel('x coordinate')
+        axes[0, 0].set_ylabel('y coordinate')
+        axes[0, 0].legend(loc='upper left')
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].axis('equal')
+        axes[0, 0].set_xlim(-0.8, 0.8)
+        axes[0, 0].set_ylim(-0.8, 0.8)
+
+        # Plot 2: SGM Constant (step=1.0) (top-right) - show actual intermediate signals
+        axes[0, 1].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.8)
+        axes[0, 1].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightgray', s=8, alpha=0.5, label='Noisy Signal')
+
+        if frame_idx < len(sgm_const_1_alg.intermediate_points):
+            current_signal = sgm_const_1_alg.intermediate_points[frame_idx]
+            axes[0, 1].plot(current_signal[:, 0], current_signal[:, 1],
+                        'blue', linewidth=2, alpha=0.9, label='SGM Constant (step=1.0)')
+            actual_iter = sgm_const_1_alg.intermediate_iterations[frame_idx]
+            axes[0, 1].set_title(f'SGM Constant 1.0 (Iter {actual_iter})')
+        else:
+            # Show final result if we've run out of intermediate points
+            axes[0, 1].plot(sgm_const_1_alg.best_point[:, 0], sgm_const_1_alg.best_point[:, 1],
+                        'blue', linewidth=2, alpha=0.9, label='SGM Constant (step=1.0)')
+            axes[0, 1].set_title(f'SGM Constant 1.0 (Final)')
+
+        axes[0, 1].set_xlabel('x coordinate')
+        axes[0, 1].set_ylabel('y coordinate')
+        axes[0, 1].legend(loc='upper left')
+        axes[0, 1].grid(True, alpha=0.3)
+        axes[0, 1].axis('equal')
+        axes[0, 1].set_xlim(-0.8, 0.8)
+        axes[0, 1].set_ylim(-0.8, 0.8)
+
+        # Bottom-left: SGM Constant (step=1.0) - show actual intermediate signals
+        axes[1, 0].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.8)
+        axes[1, 0].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightgray', s=8, alpha=0.5, label='Noisy Signal')
+
+        if frame_idx < len(sgm_const_05_alg.intermediate_points):
+            current_signal = sgm_const_05_alg.intermediate_points[frame_idx]
+            axes[1, 0].plot(current_signal[:, 0], current_signal[:, 1],
+                        'green', linewidth=2, alpha=0.9, label='SGM Constant (step=0.5)')
+            actual_iter = sgm_const_05_alg.intermediate_iterations[frame_idx]
+            axes[1, 0].set_title(f'SGM Constant 0.5 (Iter {actual_iter})')
+        else:
+            # Show final result if we've run out of intermediate points
+            axes[1, 0].plot(sgm_const_05_alg.best_point[:, 0], sgm_const_05_alg.best_point[:, 1],
+                        'green', linewidth=2, alpha=0.9, label='SGM Constant (step=0.5)')
+            axes[1, 0].set_title(f'SGM Constant 0.5 (Final)')
+
+        axes[1, 0].set_xlabel('x coordinate')
+        axes[1, 0].set_ylabel('y coordinate')
+        axes[1, 0].legend(loc='upper left')
+        axes[1, 0].grid(True, alpha=0.3)
+        axes[1, 0].axis('equal')
+        axes[1, 0].set_xlim(-0.8, 0.8)
+        axes[1, 0].set_ylim(-0.8, 0.8)
+
+        # Plot 4: SGM Decaying (bottom-right) - show actual intermediate signals
+        axes[1, 1].plot(problem.q_clean[:, 0], problem.q_clean[:, 1], 'k-', linewidth=2, label='Clean Signal', alpha=0.8)
+        axes[1, 1].scatter(problem.q_noisy[:, 0], problem.q_noisy[:, 1], c='lightgray', s=8, alpha=0.5, label='Noisy Signal')
+
+        if frame_idx < len(sgm_decay_alg.intermediate_points):
+            current_signal = sgm_decay_alg.intermediate_points[frame_idx]
+            axes[1, 1].plot(current_signal[:, 0], current_signal[:, 1],
+                        'red', linewidth=2, alpha=0.9, label='SGM Decaying (1/√(k+1))')
+            actual_iter = sgm_decay_alg.intermediate_iterations[frame_idx]
+            axes[1, 1].set_title(f'SGM Decaying (Iter {actual_iter})')
+        else:
+            # Show final result if we've run out of intermediate points
+            axes[1, 1].plot(sgm_decay_alg.best_point[:, 0], sgm_decay_alg.best_point[:, 1],
+                        'red', linewidth=2, alpha=0.9, label='SGM Decaying (1/√(k+1))')
+            axes[1, 1].set_title(f'SGM Decaying (Final)')
+
+        axes[1, 1].set_xlabel('x coordinate')
+        axes[1, 1].set_ylabel('y coordinate')
+        axes[1, 1].legend(loc='upper left')
+        axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].axis('equal')
+        axes[1, 1].set_xlim(-0.8, 0.8)
+        axes[1, 1].set_ylim(-0.8, 0.8)
+
+    # Create animation frames
+    frames = list(range(max_frames))
+    anim = FuncAnimation(fig, animate, frames=frames, interval=1000//fps, repeat=True)
+
+    # Save as GIF
+    writer = PillowWriter(fps=fps)
+    anim.save(save_path, writer=writer)
+
+    plt.close(fig)  # Close the figure to free memory
+
+    print(f"✓ Four-way animated signal evolution GIF saved as '{save_path}'")
+    print(f"   - Shows actual signal reconstruction at every 5 iterations for four methods")
+    print(f"   - Total frames: {max_frames}")
+    logger.info(f"Four-way animated signal evolution GIF saved as '{save_path}' with {max_frames} frames")
+
+    return save_path
+
+# Create the four-way comparison visualization
+print("Creating four-way comparison static plot...")
+four_way_fig = create_four_way_comparison_plot(problem, rpb_method, sgm_constant_1, sgm_constant_05, sgm_decaying_1,
+                                                save_path='four_way_denoising_comparison.png')
+
+# Create the animated GIF
+print("\nCreating four-way comparison animated GIF...")
+gif_path = create_four_way_animated_gif(problem, rpb_method, sgm_constant_1, sgm_constant_05, sgm_decaying_1,
+                                        save_path='four_way_denoising_comparison.gif', fps=8)
+
+# Print final four-way comparison summary
+print("\n" + "="*70)
+print("FOUR-WAY COMPARISON SUMMARY")
+print("="*70)
+
+methods_data = [
+    ("Bundle Method", rpb_method.raw_objective_history[-1], problem.compute_error(rpb_method.current_proximal_center), len(rpb_method.objective_history)),
+    ("SGM Constant (step=1.0)", sgm_constant_1.best_objective, problem.compute_error(sgm_constant_1.best_point), len(sgm_constant_1.objective_history)),
+    ("SGM Constant (step=0.5)", sgm_constant_05.best_objective, problem.compute_error(sgm_constant_05.best_point), len(sgm_constant_05.objective_history)),
+    ("SGM Decaying (1/√(k+1))", sgm_decaying_1.best_objective, problem.compute_error(sgm_decaying_1.best_point), len(sgm_decaying_1.objective_history))
+]
+
+print(f"{'Method':<25} {'Final Objective':<15} {'Error vs Clean':<15} {'Iterations':<12}")
+print("-" * 70)
+for method_name, final_obj, error, iterations in methods_data:
+    print(f"{method_name:<25} {final_obj:<15.8f} {error:<15.8f} {iterations:<12}")
+
+# Determine winner
+best_method = min(methods_data, key=lambda x: x[1])
+print(f"\nWinner (lowest objective): {best_method[0]}")
+print(f"Winning objective: {best_method[1]:.8f}")
+
+# Log final four-way results
+logger.info("FOUR-WAY COMPARISON COMPLETED:")
+for method_name, final_obj, error, iterations in methods_data:
+    logger.info(f"{method_name}: objective={final_obj:.8f}, error={error:.8f}, iterations={iterations}")
+logger.info(f"Winner: {best_method[0]} with objective {best_method[1]:.8f}")
+
+print("\n" + "="*70)
+print("FOUR-WAY DENOISING COMPARISON EXPERIMENT COMPLETED!")
+print("="*70)
+print("\nGenerated files:")
+print("  - four_way_denoising_comparison.png: Static four-way comparison")
+print("  - four_way_denoising_comparison.gif: Animated four-way comparison")
+print("="*70)
+
+# Display the static comparison plot
 plt.show()
 
 # %%
