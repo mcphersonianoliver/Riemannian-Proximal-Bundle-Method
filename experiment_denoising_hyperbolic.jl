@@ -48,11 +48,11 @@ Random.seed!(42)
 num_points = 456
 sigma = 0.3 # noise level
 alpha = 0.5 # regularization parameter
-atol = 1e-6
+atol = 1e-8
 k_max = 0.0 # maximum sectional curvature
 k_min = -1.0 # minimum sectional curvature
 max_iter = 100_000 # maximum iterations
-extended_max_iter = 100_000 # extended maximum iterations for sgm and rbm to find true minimum
+extended_max_iter = 1_000_000 # extended maximum iterations for sgm and rbm to find true minimum
 back_tracking_fact = 2 # backtracking factor
 
 # --- our algorithm's parameters ---
@@ -247,7 +247,7 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
     # Set default titles and labels based on plot_current flag
     if title === nothing
         title = plot_current ? "Hyperbolic Signal Denoising" :
-                              "Hyperbolic Signal Densoising"
+                              "Hyperbolic Signal Denoising"
     end
     if ylabel === nothing
         ylabel = plot_current ? "Current Objective Gap" : "Minimum Objective Gap"
@@ -885,6 +885,13 @@ if !isempty(rpb_solver.objective_increase_flags)
     end
 end
 
+# Print the wall-clock times for all methods
+println("\nWall-clock times for all methods:")
+println("  RPB total time: $rpb_total_time seconds")
+println("  RCBM total time: $rcbm_total_time seconds")
+println("  PBA total time: $pba_total_time seconds")
+println("  SGM total time: $sgm_total_time seconds")
+
 # --- Create Plots from Experiment ---
 # SGM vs Our Bundle Method Log-Log Plots (reference and no reference line), along with current objective vs minimum objective plots
 records = [rpb_record, sgm_record]
@@ -1083,16 +1090,16 @@ end
 
 
 # recover list of iterates (proximal centers)
-pba_iterates = get_record(pba, :Iteration, :Iterate)
-pba_search_directions = get_record(pba, :Iteration, :X)
-rcbm_iterates = get_record(rcbm, :Iteration, :Iterate)
-rcbm_search_directions = get_record(rcbm, :Iteration, :X)
+# pba_iterates = get_record(pba, :Iteration, :Iterate)
+# pba_search_directions = get_record(pba, :Iteration, :X)
+# rcbm_iterates = get_record(rcbm, :Iteration, :Iterate)
+# rcbm_search_directions = get_record(rcbm, :Iteration, :X)
 
-# check if iterates are actually on the manifold for other bundle methods
-println("\n--- Verifying PBA Geometry ---")
-pba_p_rmse_history, pba_v_rmse_history = verify_geometry(Hn, pba_iterates, pba_search_directions; atol=1e-12)
-println("\n--- Verifying RCBM Geometry ---")
-rcbm_p_rmse_history, rcbm_v_rmse_history = verify_geometry(Hn, rcbm_iterates, rcbm_search_directions; atol=1e-12)
+# # check if iterates are actually on the manifold for other bundle methods
+# println("\n--- Verifying PBA Geometry ---")
+# pba_p_rmse_history, pba_v_rmse_history = verify_geometry(Hn, pba_iterates, pba_search_directions; atol=1e-12)
+# println("\n--- Verifying RCBM Geometry ---")
+# rcbm_p_rmse_history, rcbm_v_rmse_history = verify_geometry(Hn, rcbm_iterates, rcbm_search_directions; atol=1e-12)
 
 # --- Run Phase 2 Again for SGM and RPB for much longer since they are fast ---
 # println("\n=== PHASE 3: Extended runs for SGM and RPB ===")
@@ -1178,3 +1185,14 @@ rcbm_p_rmse_history, rcbm_v_rmse_history = verify_geometry(Hn, rcbm_iterates, rc
 #     manifold_tolerance=1e-9,
 #     show_reference=false,
 # )   
+
+# print wall-clock times from phase 2 and phase 3
+println("\nWall-clock times for all methods in Phase 2:")
+println("  RPB total time: $rpb_total_time seconds")
+println("  RCBM total time: $rcbm_total_time seconds")
+println("  PBA total time: $pba_total_time seconds")
+println("  SGM total time: $sgm_total_time seconds")
+
+# println("\nWall-clock times for extended methods:")
+# println("  Extended RPB total time: $rpb_extended_total_time seconds")
+# println("  Extended SGM total time: $sgm_extended_total_time seconds")
