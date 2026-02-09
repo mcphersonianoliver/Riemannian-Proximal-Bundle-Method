@@ -1,8 +1,9 @@
+
 using LinearAlgebra
 using Plots
 
 # Export main functions
-export RProximalBundle, run!, plot_objective_versus_iter, plot_transport_constant_versus_iter, plot_model_proximal_gap, print_last_step_type
+export RProximalBundle, run!, plot_objective_versus_iter, print_last_step_type
 
 """
     RProximalBundle{T <: AbstractFloat}
@@ -39,14 +40,13 @@ mutable struct RProximalBundle{T <: AbstractFloat}
     current_proximal_center::Any  # where model lives during constructions
     subgradient_at_center::Any    # g_{k}, subgradient at proximal center
     proximal_parameter::T   # current ρ_{k}
-    single_cut::Bool             # flag for if the model is single-cut 
+    single_cut::Bool             # flag for if the model is single-cut
     two_cut::Bool           # flag for if the model is two-cut
     back_tracking_factor::T # factor for backtracking proximal parameter
 
     initial_objective::T   # f(x_{0})
     max_iter::Int               # maximum number of iterations
     tolerance::T          # tolerance for convergence
-    numerical_tolerance::T      # tolerance for numerical precision (shift adjustment)
     trust_parameter::T    # pre-specified beta
 
     # Current Model Information Storage
@@ -58,7 +58,6 @@ mutable struct RProximalBundle{T <: AbstractFloat}
     new_cut_shift::T          # f(R_x(d_{t+1})), true objective at candidate point for new cut
 
     # Toggles for variants
-    adaptive_proximal::Bool     # flag for if the proximal parameter is adaptively updated - unused, remnant from earlier versions
     know_minimizer::Bool        # flag for if the true minimizer is known
     relative_error::Bool        # flag for if the error to store should be taken with the initial objective as a denominator
 
@@ -72,15 +71,6 @@ mutable struct RProximalBundle{T <: AbstractFloat}
     error_shifts::Vector{T}              # e_{f_k}(ρ_{k})
     proximal_center_history::Vector{Any}       # x_{k}
 
-    # Model information for two-cut model evaluation
-    prev_candidate_direction::Union{Nothing, Any}
-    prev_true_obj::Union{Nothing, T}
-    prev_model_obj::Union{Nothing, T}
-    prev_transport_subg::Union{Nothing, Any}
-    prev_model_subg::Union{Nothing, Any}
-    prev_error_shift::Union{Nothing, T}
-    prev_prox_parameter::T
-
     # Storage for algorithm run
     proximal_parameter_history::Vector{T}
     relative_objective_history::Vector{T}
@@ -89,27 +79,28 @@ mutable struct RProximalBundle{T <: AbstractFloat}
     true_min_obj::T
     indices_of_descent_steps::Vector{Int}
     indices_of_null_steps::Vector{Int}
-    indices_of_proximal_doubling_steps::Vector{Int}
     iteration::Vector{Int}                     # Store iteration numbers
-    potential_error_shift::T
 
     debugging::Bool          # Debugging flag
-    transport_constant_approx::Vector{T}      # Placeholder for transport constant approximation
     objective_increase_flags::Vector{Bool}    # Flag when f(x_k) < f(x_{k+1}) at proximal centers
     descent_step_ratios::Vector{T}           # Store ratio values for descent steps
     descent_step_numerators::Vector{T}       # Store numerator values for descent steps
     descent_step_denominators::Vector{T}     # Store denominator values for descent steps
     descent_step_iterations::Vector{Int}     # Store which iterations had descent steps
     model_proximal_gap_history::Vector{T}    # Store model proximal gap values for each iteration
-    last_step_type::Symbol                   # Track the type of the last step (:descent, :null, :doubling, or :initial)
+    last_step_type::Symbol                   # Track the type of the last step (:descent, :null, or :initial)
+    memory_lite::Bool                        # Flag for memory-lite mode (only stores objective gap, proximal parameters, and index tracking)
 
     function RProximalBundle{T}(manifold, retraction_map, transport_map, objective_function,
                             subgradient, initial_point, initial_objective::T, initial_subgradient;
                             true_min_obj::T=T(0.0), retraction_error::T=T(0.0), transport_error::T=T(0.0),
                             sectional_curvature::T=T(-1.0), proximal_parameter::T=T(0.02),
                             trust_parameter::T=T(0.1), max_iter::Int=5000, tolerance::T=T(1e-12),
-                            numerical_tolerance::T=T(1e-14), max_rho::T=T(1e8), back_tracking_factor::T=T(2.0), adaptive_proximal::Bool=true, know_minimizer::Bool=true, relative_error::Bool=true,
-                            debugging::Bool=false) where T <: AbstractFloat
+                            max_rho::T=T(1e8), back_tracking_factor::T=T(2.0),
+                            know_minimizer::Bool=true, relative_error::Bool=true,
+                            debugging::Bool=false, memory_lite::Bool=false,
+                            adaptive_proximal::Bool=true) where T <: AbstractFloat
+                            # adaptive_proximal kept as kwarg for backward compatibility but is not stored
 
         # Initialize storage arrays
         model_subg = [initial_subgradient]
@@ -130,13 +121,11 @@ mutable struct RProximalBundle{T <: AbstractFloat}
         # Initialize index tracking arrays
         indices_of_descent_steps = Int[]
         indices_of_null_steps = Int[]
-        indices_of_proximal_doubling_steps = Int[]
 
         # Initialize iteration array with starting value
         iteration = [0]
 
         # Initialize debugging arrays
-        transport_constant_approx = T[]
         objective_increase_flags = Bool[]
         descent_step_ratios = T[]
         descent_step_numerators = T[]
@@ -148,20 +137,19 @@ mutable struct RProximalBundle{T <: AbstractFloat}
             retraction_error, transport_error, sectional_curvature, max_rho,
             objective_function, subgradient,
             initial_point, initial_subgradient, proximal_parameter, true, false, back_tracking_factor,
-            initial_objective, max_iter, tolerance, numerical_tolerance, trust_parameter,
+            initial_objective, max_iter, tolerance, trust_parameter,
             initial_subgradient, initial_objective, nothing, T(0.0), nothing, T(0.0),
-            adaptive_proximal, know_minimizer, relative_error,
+            know_minimizer, relative_error,
             model_subg, untransported_subgradients, transported_subgradients,
             candidate_directions, candidate_obj_history, candidate_model_obj_history,
             error_shifts, proximal_center_history,
-            nothing, nothing, nothing, nothing, nothing, nothing, proximal_parameter,
             proximal_parameter_history, relative_objective_history, objective_history,
             raw_objective_history, true_min_obj,
-            indices_of_descent_steps, indices_of_null_steps, indices_of_proximal_doubling_steps,
-            iteration, T(0.0),
-            debugging, transport_constant_approx, objective_increase_flags,
+            indices_of_descent_steps, indices_of_null_steps,
+            iteration,
+            debugging, objective_increase_flags,
             descent_step_ratios, descent_step_numerators, descent_step_denominators, descent_step_iterations,
-            model_proximal_gap_history, :initial)
+            model_proximal_gap_history, :initial, memory_lite)
     end
 end
 
@@ -185,15 +173,6 @@ function run!(rpb::RProximalBundle{T}) where T
         # Increment iteration counter
         push!(rpb.iteration, i)
 
-        # --- Remnant code from earlier versions - IGNORE ---
-        # # Fix two-non-anchor cuts before any updates
-        # rpb.prev_candidate_direction = length(rpb.candidate_directions) > 0 ? rpb.candidate_directions[end] : nothing
-        # rpb.prev_true_obj = length(rpb.candidate_obj_history) > 0 ? rpb.candidate_obj_history[end] : nothing
-        # rpb.prev_model_obj = length(rpb.candidate_model_obj_history) > 0 ? rpb.candidate_model_obj_history[end] : nothing
-        # rpb.prev_transport_subg = length(rpb.transported_subgradients) > 0 ? rpb.transported_subgradients[end] : nothing
-        # rpb.prev_model_subg = length(rpb.model_subg) > 0 ? rpb.model_subg[end] : nothing
-        # rpb.prev_error_shift = length(rpb.error_shifts) > 0 ? rpb.error_shifts[end] : nothing
-
         # Backtracking to ensure proximal parameter satisfies a descent or null condition - recover candidate iterate
         candidate_point, candidate_direction, descent_flag, new_subgradient, transported_new_subgradient, potential_error_shift, ratio = backtracking_procedure(rpb)
 
@@ -206,7 +185,7 @@ function run!(rpb::RProximalBundle{T}) where T
         # Accept rule
         if descent_flag  # DESCENT STEP
             # Store ratio information for debugging (before updating state)
-            if rpb.debugging
+            if rpb.debugging && !rpb.memory_lite
                 candidate_objective = rpb.candidate_obj_history[end]
                 model_objective = rpb.candidate_model_obj_history[end]
                 numerator = current_objective - candidate_objective
@@ -218,20 +197,24 @@ function run!(rpb::RProximalBundle{T}) where T
             end
 
             # Update current proximal center
-            rpb.current_proximal_center = candidate_point  
-            push!(rpb.proximal_center_history, candidate_point) 
+            rpb.current_proximal_center = candidate_point
+            if !rpb.memory_lite
+                push!(rpb.proximal_center_history, candidate_point)
+            end
 
-            # Update and change to single cut model 
+            # Update and change to single cut model
             rpb.anchor_cut_subg = new_subgradient  # g_{k+1}
             rpb.anchor_cut_shift = candidate_objective  # f(x_{k+1})
             rpb.single_cut = true
             rpb.two_cut = false
 
             # Update model information - one-cut model now! --- Remove this when cleaning up code ---
-            push!(rpb.untransported_subgradients, new_subgradient)  # g_{k+1}
-            push!(rpb.transported_subgradients, transported_new_subgradient)    # no transport is done
-            push!(rpb.error_shifts, T(0.0))  # e_{f_k}(ρ_{k+1}) = 0, no transport is done
- 
+            if !rpb.memory_lite
+                push!(rpb.untransported_subgradients, new_subgradient)  # g_{k+1}
+                push!(rpb.transported_subgradients, transported_new_subgradient)    # no transport is done
+                push!(rpb.error_shifts, T(0.0))  # e_{f_k}(ρ_{k+1}) = 0, no transport is done
+            end
+
             push!(rpb.indices_of_descent_steps, i)
             push!(rpb.proximal_parameter_history, rpb.proximal_parameter)
 
@@ -273,18 +256,24 @@ function run!(rpb::RProximalBundle{T}) where T
                 rpb.new_cut_shift = candidate_objective - inner_product(rpb.manifold, rpb.current_proximal_center, transported_new_subgradient, candidate_direction) - potential_error_shift
 
                 if rpb.new_cut_shift > rpb.anchor_cut_shift
-                    print("Warning: New cut shift greater than proximal center objective - ERROR\n")
-                    print("New cut shift: $(rpb.new_cut_shift), Proximal center objective: $(rpb.anchor_cut_shift)\n")
-                    print("Error shift applied: $(potential_error_shift)\n")
-                    print("Proximal parameter: $(rpb.proximal_parameter)\n")
+                    if abs(rpb.new_cut_shift - rpb.anchor_cut_shift) < T(1e-12)
+                        rpb.new_cut_shift = rpb.anchor_cut_shift
+                    else
+                        print("Warning: New cut shift greater than proximal center objective - ERROR\n")
+                        print("New cut shift: $(rpb.new_cut_shift), Proximal center objective: $(rpb.anchor_cut_shift)\n")
+                        print("Error shift applied: $(potential_error_shift)\n")
+                        print("Proximal parameter: $(rpb.proximal_parameter)\n")
+                    end
                 end
             end
 
             # updates model for two non-anchor cuts --- remove when cleaning up code ---
-            push!(rpb.untransported_subgradients, new_subgradient)  # g_{k+1}
-            push!(rpb.transported_subgradients, transported_new_subgradient)   # ĝ_{k+1}
-            push!(rpb.model_subg, -(rpb.proximal_parameter * candidate_direction))                     # s_{k+1}
-            push!(rpb.error_shifts, potential_error_shift)  # conservative shift adjustment
+            if !rpb.memory_lite
+                push!(rpb.untransported_subgradients, new_subgradient)  # g_{k+1}
+                push!(rpb.transported_subgradients, transported_new_subgradient)   # ĝ_{k+1}
+                push!(rpb.model_subg, -(rpb.proximal_parameter * candidate_direction))                     # s_{k+1}
+                push!(rpb.error_shifts, potential_error_shift)  # conservative shift adjustment
+            end
 
             push!(rpb.proximal_parameter_history, rpb.proximal_parameter)
             push!(rpb.indices_of_null_steps, i)
@@ -295,47 +284,51 @@ function run!(rpb::RProximalBundle{T}) where T
 
         # Store objective at current proximal center after each iteration (regardless of step type)
         current_proximal_objective = rpb.compute_objective(rpb.current_proximal_center)
-        push!(rpb.relative_objective_history, (current_proximal_objective - rpb.true_min_obj) / (rpb.initial_objective - rpb.true_min_obj))
+        if !rpb.memory_lite
+            push!(rpb.relative_objective_history, (current_proximal_objective - rpb.true_min_obj) / (rpb.initial_objective - rpb.true_min_obj))
+        end
         push!(rpb.objective_history, current_proximal_objective - rpb.true_min_obj)
         push!(rpb.raw_objective_history, current_proximal_objective)
 
-        # Store model proximal gap for each iteration
-        current_model_gap = compute_model_proximal_gap(rpb, candidate_direction, candidate_model_objective)
-        push!(rpb.model_proximal_gap_history, current_model_gap)
+        if !rpb.memory_lite
+            # Store model proximal gap for each iteration
+            current_model_gap = compute_model_proximal_gap(rpb, candidate_direction, candidate_model_objective)
+            push!(rpb.model_proximal_gap_history, current_model_gap)
 
-        # Store current proximal center at each iteration for complete record
-        if length(rpb.proximal_center_history) <= i
-            push!(rpb.proximal_center_history, rpb.current_proximal_center)
-        end
-
-        # Check for objective increase at proximal center: f(x_k) < f(x_{k+1})
-        if length(rpb.raw_objective_history) > 1
-            prev_proximal_objective = rpb.raw_objective_history[end-1]
-            current_proximal_objective = rpb.raw_objective_history[end]
-            objective_increased = prev_proximal_objective < current_proximal_objective
-            push!(rpb.objective_increase_flags, objective_increased)
-
-            if objective_increased && rpb.debugging
-                println("Warning: Objective increased at proximal center from $(prev_proximal_objective) to $(current_proximal_objective) at iteration $i")
-                # Find the most recent descent step that led to this objective increase
-                if length(rpb.descent_step_iterations) > 0
-                    # The most recent descent step should be the last one recorded
-                    last_descent_idx = length(rpb.descent_step_iterations)
-                    last_descent_iter = rpb.descent_step_iterations[last_descent_idx]
-                    last_ratio = rpb.descent_step_ratios[last_descent_idx]
-                    last_numerator = rpb.descent_step_numerators[last_descent_idx]
-                    last_denominator = rpb.descent_step_denominators[last_descent_idx]
-
-                    println("  Increase at descent step at iteration $(last_descent_iter):")
-                    println("  Ratio that triggered descent: $(last_ratio)")
-                    println("  Numerator (true gap): $(last_numerator)")
-                    println("  Denominator (model gap): $(last_denominator)")
-                    println(" Proximal parameter at that step: $(rpb.proximal_parameter_history[last_descent_iter + 1])")  # +1 due to initial entry
-                end
+            # Store current proximal center at each iteration for complete record
+            if length(rpb.proximal_center_history) <= i
+                push!(rpb.proximal_center_history, rpb.current_proximal_center)
             end
-        else
-            # First iteration, no comparison possible
-            push!(rpb.objective_increase_flags, false)
+
+            # Check for objective increase at proximal center: f(x_k) < f(x_{k+1})
+            if length(rpb.raw_objective_history) > 1
+                prev_proximal_objective = rpb.raw_objective_history[end-1]
+                current_proximal_objective = rpb.raw_objective_history[end]
+                objective_increased = prev_proximal_objective < current_proximal_objective
+                push!(rpb.objective_increase_flags, objective_increased)
+
+                if objective_increased && rpb.debugging
+                    println("Warning: Objective increased at proximal center from $(prev_proximal_objective) to $(current_proximal_objective) at iteration $i")
+                    # Find the most recent descent step that led to this objective increase
+                    if length(rpb.descent_step_iterations) > 0
+                        # The most recent descent step should be the last one recorded
+                        last_descent_idx = length(rpb.descent_step_iterations)
+                        last_descent_iter = rpb.descent_step_iterations[last_descent_idx]
+                        last_ratio = rpb.descent_step_ratios[last_descent_idx]
+                        last_numerator = rpb.descent_step_numerators[last_descent_idx]
+                        last_denominator = rpb.descent_step_denominators[last_descent_idx]
+
+                        println("  Increase at descent step at iteration $(last_descent_iter):")
+                        println("  Ratio that triggered descent: $(last_ratio)")
+                        println("  Numerator (true gap): $(last_numerator)")
+                        println("  Denominator (model gap): $(last_denominator)")
+                        println(" Proximal parameter at that step: $(rpb.proximal_parameter_history[last_descent_iter + 1])")  # +1 due to initial entry
+                    end
+                end
+            else
+                # First iteration, no comparison possible
+                push!(rpb.objective_increase_flags, false)
+            end
         end
 
         # Check for convergence
@@ -363,7 +356,7 @@ end
     print_last_step_type(rpb::RProximalBundle)
 
 Print the type of the last step taken in the algorithm.
-At iteration k, this shows whether iteration k-1 was a descent, null, or doubling step.
+At iteration k, this shows whether iteration k-1 was a descent or null step.
 """
 function print_last_step_type(rpb::RProximalBundle)
     current_iter = length(rpb.iteration) > 0 ? rpb.iteration[end] : 0
@@ -375,8 +368,6 @@ function print_last_step_type(rpb::RProximalBundle)
             "descent step (ratio > trust_parameter, model moved to candidate point)"
         elseif rpb.last_step_type == :null
             "null step (ratio ≤ trust_parameter, model updated but not moved)"
-        elseif rpb.last_step_type == :doubling
-            "proximal parameter doubling step (proximal gap check failed)"
         elseif rpb.last_step_type == :initial
             "initial state (no step taken)"
         else
@@ -446,30 +437,6 @@ function cand_prox_direction(rpb::RProximalBundle{T}) where T
     end
     
     if rpb.two_cut
-        # Use stored two-cut model information to compute proximal direction
-        # Check for Nothing values and handle them
-
-        # if rpb.prev_transport_subg === nothing || rpb.prev_model_subg === nothing ||
-        #    rpb.prev_true_obj === nothing || rpb.prev_error_shift === nothing || rpb.prev_model_obj === nothing
-        #     # Fallback to single-cut if two-cut data is incomplete
-        #     return -(rpb.untransported_subgradients[end] / rpb.proximal_parameter)
-        # end
-
-        # numerator = rpb.proximal_parameter * (rpb.prev_true_obj - rpb.prev_error_shift - rpb.prev_model_obj)
-        # denominator = (norm(rpb.manifold, rpb.current_proximal_center, rpb.prev_transport_subg - rpb.prev_model_subg))^2
-
-        # # Avoid division by zero
-        # if denominator < T(1e-12)
-        #     println("Warning: Denominator in convex combination calculation is too small; reverting to single-cut proximal direction.")
-        #     return -(rpb.untransported_subgradients[end] / rpb.proximal_parameter)
-        # end
-
-        # convex_comb_arg = numerator / denominator
-        # convex_comb = min(T(1), max(T(0), convex_comb_arg))  # Ensure convex_comb is in [0,1]
-
-        # # Computes the proximal direction - convex combination of two subg
-        # return -(T(1) / rpb.proximal_parameter) * (convex_comb * rpb.prev_transport_subg + (T(1) - convex_comb) * rpb.prev_model_subg)
-
         # Gather necessary data for two-cut proximal computation
         a_1 = rpb.new_cut_subg  
         b_1 = rpb.new_cut_shift
@@ -619,16 +586,6 @@ function compute_three_cut_proximal(rpb::RProximalBundle{T}) where T
     # Since we're in the tangent space at rpb.current_proximal_center, we can use standard linear combinations
     result = optimal_lambda[1] .* a_1 .+ optimal_lambda[2] .* a_2 .+ optimal_lambda[3] .* a_3
 
-    if dual_objective(optimal_lambda) > rpb.anchor_cut_shift
-        # print("Warning: Dual objective at optimal lambda exceeds anchor cut shift; possible numerical issue.\n")
-        # print("Optimal lambda: $(optimal_lambda), Dual value: $(dual_objective(optimal_lambda)), Anchor cut shift: $(rpb.anchor_cut_shift)\n")
-    end
-
-    # print("dual_objective(optimal_lambda): $(dual_objective(optimal_lambda))\n")
-    
-    # model_objective = model_evaluation(rpb, -(one(T)/rpb.proximal_parameter) .* result)
-    # print("primal_solution_objective: $(model_objective + (rpb.proximal_parameter / 2) * inner_product(rpb.manifold, rpb.current_proximal_center, -(one(T)/rpb.proximal_parameter) .* result, -(one(T)/rpb.proximal_parameter) .* result))\n")
-
     return -(one(T)/rpb.proximal_parameter) .* result
 
 end
@@ -649,19 +606,6 @@ function model_versus_true(rpb::RProximalBundle{T}, cand_obj, cand_model, curren
     true_gap = current_obj - cand_obj
     model_gap = current_obj - cand_model
 
-    # numerical_tolerance = 10 * eps(typeof(current_obj))
-
-    # check if gaps are above floating point representation
-    # if abs(true_gap) < numerical_tolerance
-        # print("Warning: True gap below numerical tolerance; setting to zero.\n")
-        # true_gap = T(0.0)
-    # end
-    
-    # if abs(model_gap) < numerical_tolerance
-    #     # print("Warning: Model gap below numerical tolerance; setting to zero.\n")
-    #     # model_gap = T(0.0)
-    # end
-
     if model_gap == T(0)
         ratio = Inf
     else
@@ -672,9 +616,6 @@ function model_versus_true(rpb::RProximalBundle{T}, cand_obj, cand_model, curren
         return true, ratio
     end
 
-    # print("Model versus true objective gap check failed.\n")
-    # print("Current Obj: $(current_obj), Candidate Obj: $(cand_obj), Model Obj: $(cand_model)\n")
-    # print("True Gap: $(current_obj - cand_obj), Model Gap: $(current_obj - cand_model)\n")
     return false, ratio
 end
 
@@ -737,10 +678,6 @@ function compute_model_proximal_gap(rpb::RProximalBundle{T}, candidate_direction
     prox_obj_on_model = model_objective + (rpb.proximal_parameter / 2) * inner_product(rpb.manifold, rpb.current_proximal_center, candidate_direction, candidate_direction)
 
     prox_gap = current_location_objective - prox_obj_on_model
-    # if prox_gap < T(0)
-    #     print("Warning: Computed negative proximal gap due to floating point errors; setting to zero.\n")
-    #     print("prox_gap: $(prox_gap), current_obj: $(current_location_objective), prox_obj_on_model: $(prox_obj_on_model)\n")
-    # end
     
     return prox_gap
 end
@@ -753,7 +690,7 @@ Perform a backtracking procedure to adjust proximal parameter such that conditio
 
 function backtracking_procedure(rpb::RProximalBundle{T}) where T
     # Initialize variables outside the loop scope
-    local candidate_point, candidate_direction, subgradient_at_candidate_pre_project, subgradient_at_candidate, transported_subgradient_from_candidate_pre_project, transported_subgradient_from_candidate, potential_error_shift, ratio
+    local candidate_point, candidate_direction, subgradient_at_candidate, transported_subgradient_from_candidate, potential_error_shift, ratio
 
     descent_flag = false
 
@@ -769,11 +706,9 @@ function backtracking_procedure(rpb::RProximalBundle{T}) where T
 
         # Cache current objective for descent check computation
         current_objective = rpb.compute_objective(rpb.current_proximal_center)
-        subgradient_at_candidate_pre_project = rpb.compute_subgradient(candidate_point)
-        subgradient_at_candidate = project(rpb.manifold, candidate_point, subgradient_at_candidate_pre_project)
+        subgradient_at_candidate = rpb.compute_subgradient(candidate_point)
 
-        transported_subgradient_from_candidate_pre_project = rpb.transport_map(candidate_point, rpb.current_proximal_center, subgradient_at_candidate)
-        transported_subgradient_from_candidate = project(rpb.manifold, rpb.current_proximal_center, transported_subgradient_from_candidate_pre_project)
+        transported_subgradient_from_candidate = rpb.transport_map(candidate_point, rpb.current_proximal_center, subgradient_at_candidate)
         potential_error_shift = compute_shift_adjustment(rpb, subgradient_at_candidate, candidate_point)
 
         # compute ratio and proximal gap
@@ -782,45 +717,32 @@ function backtracking_procedure(rpb::RProximalBundle{T}) where T
 
         if descent_flag
             # Store candidate data before breaking for descent step
-            push!(rpb.candidate_directions, candidate_direction)
-            push!(rpb.candidate_obj_history, candidate_objective)
-            push!(rpb.candidate_model_obj_history, model_objective)
+            if !rpb.memory_lite
+                push!(rpb.candidate_directions, candidate_direction)
+                push!(rpb.candidate_obj_history, candidate_objective)
+                push!(rpb.candidate_model_obj_history, model_objective)
+            end
             descent_flag = true
-            # print("Descent \n")
             break  # descent condition met
         end
 
         if proximal_parameter_check(rpb, current_model_proximal_gap, potential_error_shift)
             # Store candidate data before breaking for null step
-            push!(rpb.candidate_directions, candidate_direction)
-            push!(rpb.candidate_obj_history, candidate_objective)
-            push!(rpb.candidate_model_obj_history, model_objective)
-            # print("Null \n")
+            if !rpb.memory_lite
+                push!(rpb.candidate_directions, candidate_direction)
+                push!(rpb.candidate_obj_history, candidate_objective)
+                push!(rpb.candidate_model_obj_history, model_objective)
+            end
             break  # null step condition met
         end
 
         # Store objective at current proximal center after each iteration (regardless of step type)
         current_proximal_objective = rpb.anchor_cut_shift
-        push!(rpb.relative_objective_history, (current_proximal_objective - rpb.true_min_obj) / (rpb.initial_objective - rpb.true_min_obj))
+        if !rpb.memory_lite
+            push!(rpb.relative_objective_history, (current_proximal_objective - rpb.true_min_obj) / (rpb.initial_objective - rpb.true_min_obj))
+        end
         push!(rpb.objective_history, current_proximal_objective - rpb.true_min_obj)
         push!(rpb.raw_objective_history, current_proximal_objective)
-
-        # print("Checks before backtracking failed. Adjusting proximal parameter...\n")
-
-        # # for debugging purposes
-        # print("\nBacktracking: Proximal parameter adjusted from $(rpb.proximal_parameter) to $(rpb.proximal_parameter * rpb.back_tracking_factor)\n")
-        # print("Proximal Gap: $(current_model_proximal_gap),\n") 
-        # print("Shift: $(potential_error_shift)\n")
-        # print("Inner Product Subgradient at Candidate: $(inner_product(rpb.manifold, candidate_point, subgradient_at_candidate, subgradient_at_candidate))\n")
-        # project_subg_cand = project(rpb.manifold, candidate_point, subgradient_at_candidate)
-        # print("Inner Product of Projected Subgradient at Candidate: $((inner_product(rpb.manifold, candidate_point, project_subg_cand, project_subg_cand)))\n")
-        
-        # print("Inner Product of Anchor Cut Subgradient at Proximal Center: $((inner_product(rpb.manifold, rpb.current_proximal_center, rpb.anchor_cut_subg, rpb.anchor_cut_subg)))\n")
-
-        # project_subg = project(rpb.manifold, rpb.current_proximal_center, rpb.anchor_cut_subg)
-        # print("Inner Product of Projected Anchor Cut Subgradient at Proximal Center: $((inner_product(rpb.manifold, rpb.current_proximal_center, project_subg, project_subg)))\n")
-        # print("Norm of Subgradient at Candidate: $(sqrt(inner_product(rpb.manifold, candidate_point, subgradient_at_candidate, subgradient_at_candidate)))\n")
-        # print("Norm of Anchor Cut Subgradient: $(sqrt(inner_product(rpb.manifold, rpb.current_proximal_center, rpb.anchor_cut_subg, rpb.anchor_cut_subg)))\n")
 
         # If neither condition is met, multiply the proximal parameter by the backtracking factor
         rpb.proximal_parameter *= rpb.back_tracking_factor
@@ -902,17 +824,8 @@ function plot_objective_versus_iter(rpb::RProximalBundle{T}; save_path=nothing, 
         end
     end
 
-    if !isempty(rpb.indices_of_proximal_doubling_steps)
-        valid_indices = filter(i -> i + 1 <= length(y_data), rpb.indices_of_proximal_doubling_steps)
-        if !isempty(valid_indices)
-            scatter!(p, valid_indices .+ 1, y_data[valid_indices .+ 1],
-                    color=:red, marker=:uptriangle, markersize=3,
-                    label="Proximal Doubling Steps")
-        end
-    end
-
-    # Add markers for objective increases at proximal centers
-    if !isempty(rpb.objective_increase_flags)
+    # Add markers for objective increases at proximal centers (not available in memory_lite mode)
+    if !rpb.memory_lite && !isempty(rpb.objective_increase_flags)
         increase_indices = findall(rpb.objective_increase_flags)
         valid_increase_indices = filter(i -> i <= length(y_data), increase_indices)
         if !isempty(valid_increase_indices)
@@ -940,8 +853,7 @@ function plot_objective_versus_iter(rpb::RProximalBundle{T}; save_path=nothing, 
     println("----------------------------------")
     println("Descent Steps: $(length(rpb.indices_of_descent_steps))")
     println("Null Steps: $(length(rpb.indices_of_null_steps))")
-    println("Proximal Doubling Steps: $(length(rpb.indices_of_proximal_doubling_steps))")
-    if !isempty(rpb.objective_increase_flags)
+    if !rpb.memory_lite && !isempty(rpb.objective_increase_flags)
         num_increases = count(rpb.objective_increase_flags)
         println("Objective Increases at Proximal Center: $num_increases")
     end
@@ -950,226 +862,4 @@ function plot_objective_versus_iter(rpb::RProximalBundle{T}; save_path=nothing, 
     return p
 end
 
-"""
-    plot_transport_constant_versus_iter(rpb::RProximalBundle; save_path=nothing, use_loglog=false)
 
-Plot estimated transport constant C_T versus iteration number for debugging.
-Uses semi-log scale by default, with option for log-log scale.
-
-# Arguments
-- `rpb::RProximalBundle`: The proximal bundle solver instance
-- `save_path=nothing`: Optional path to save the plot. If provided, saves to this path.
-- `use_loglog=false`: If true, uses log-log scale. If false (default), uses semi-log scale.
-"""
-function plot_transport_constant_versus_iter(rpb::RProximalBundle{T}; save_path=nothing, use_loglog=false) where T
-    # Check if debugging was enabled and transport constants were collected
-    if !rpb.debugging || isempty(rpb.transport_constant_approx)
-        println("Warning: No transport constant data available. Make sure debugging=true when creating the solver.")
-        return nothing
-    end
-
-    # Create iteration numbers (add 1 to avoid log(0) issues)
-    x_data = 1:length(rpb.transport_constant_approx)
-    y_data = rpb.transport_constant_approx
-
-    # Set scale based on use_loglog parameter
-    if use_loglog
-        scale_x = :log10
-        scale_y = :log10
-        title = "Transport Constant C_T vs Iteration Number (Log-Log Scale)"
-    else
-        scale_x = :identity
-        scale_y = :log10
-        title = "Transport Constant C_T vs Iteration Number (Semi-Log Scale)"
-    end
-
-    # Create the main plot
-    p = plot(x_data, y_data,
-             label="C_T Estimate",
-             color="#dc267f",
-             linewidth=2,
-             title=title,
-             xlabel="Iteration Number",
-             ylabel="Transport Constant C_T",
-             xscale=scale_x,
-             yscale=scale_y,
-             dpi=300)
-
-    # Add markers for different step types if available
-    if !isempty(rpb.indices_of_descent_steps)
-        valid_indices = filter(i -> i <= length(y_data), rpb.indices_of_descent_steps)
-        if !isempty(valid_indices)
-            scatter!(p, valid_indices, y_data[valid_indices],
-                    color=:green, marker=:circle, markersize=4,
-                    label="Descent Steps")
-        end
-    end
-
-    if !isempty(rpb.indices_of_null_steps)
-        valid_indices = filter(i -> i <= length(y_data), rpb.indices_of_null_steps)
-        if !isempty(valid_indices)
-            scatter!(p, valid_indices, y_data[valid_indices],
-                    color=:orange, marker=:square, markersize=3,
-                    label="Null Steps")
-        end
-    end
-
-    if !isempty(rpb.indices_of_proximal_doubling_steps)
-        valid_indices = filter(i -> i <= length(y_data), rpb.indices_of_proximal_doubling_steps)
-        if !isempty(valid_indices)
-            scatter!(p, valid_indices, y_data[valid_indices],
-                    color=:red, marker=:uptriangle, markersize=3,
-                    label="Proximal Doubling Steps")
-        end
-    end
-
-    # Add grid
-    plot!(p, grid=true, gridwidth=1, gridcolor=:gray, gridalpha=0.3)
-
-    # Add horizontal line for the current transport_error parameter
-    if rpb.transport_error > 0
-        hline!(p, [rpb.transport_error],
-               color=:black, linestyle=:dash, linewidth=2,
-               label="Current Transport Error Parameter")
-    end
-
-    # Save plot if path is provided
-    if save_path !== nothing
-        savefig(p, save_path)
-        println("Transport constant plot saved to: $save_path")
-    end
-
-    display(p)
-
-    # Print summary statistics
-    println(title)
-    println("----------------------------------")
-    if !isempty(y_data)
-        println("Final C_T Estimate: $(y_data[end])")
-        println("Maximum C_T Estimate: $(maximum(y_data))")
-        println("Minimum C_T Estimate: $(minimum(y_data))")
-        println("Mean C_T Estimate: $(sum(y_data)/length(y_data))")
-        println("Current Transport Error Parameter: $(rpb.transport_error)")
-        println("----------------------------------")
-        println("Total Estimates: $(length(y_data))")
-    end
-
-    return p
-end
-
-"""
-    compute_transport_error_constant_approximation(rpb:RProximalBundle, new_subgradient, candidate_point)
-
-Compute transport error constant approximation for the model. C_{T} = \frac{||vec_transport(new_subgradient) - par_transport(new_subgradient||}{||new_subgradient|| d(x_{k}, z_{k+1})}
-"""
-function compute_transport_error_constant_approximation(rpb::RProximalBundle{T}, new_subgradient, candidate_point) where T
-    # # Parallel transport of the new subgradient from candidate_point to proximal center
-    # parallel_transported = vector_transport_to(rpb.manifold, candidate_point, new_subgradient, rpb.current_proximal_center, ParallelTransport())
-
-    # # Projection transport of the new subgradient from candidate_point to proximal center
-    # projection_transported = vector_transport_to(rpb.manifold, candidate_point, new_subgradient, rpb.current_proximal_center, ProjectionTransport())
-
-    # # Compute the norm of the difference between the two transport methods
-    # transport_diff_norm = norm(rpb.manifold, rpb.current_proximal_center, parallel_transported - projection_transported)
-
-    # # Compute the norm of the original subgradient
-    # original_subg_norm = norm(rpb.manifold, candidate_point, new_subgradient)
-
-    # # Compute the distance between the points
-    # transport_distance = distance(rpb.manifold, candidate_point, rpb.current_proximal_center)
-
-    # # Compute the transport error constant approximation
-    # # C_T = ||vec_transport(subgradient) - par_transport(subgradient)|| / (||subgradient|| * distance)
-    # if original_subg_norm * transport_distance > T(1e-12)
-    #     transport_error_constant = transport_diff_norm / (original_subg_norm * transport_distance)
-    # else
-    #     transport_error_constant = T(0.0)  # Avoid division by zero
-    # end
-
-    # # return transport_error_constant
-
-    # Temporary replacement - return the configured transport error parameter
-    return rpb.transport_error
-end
-
-"""
-    plot_model_proximal_gap(rpb::RProximalBundle; save_path=nothing, use_loglog=false)
-
-Plot model proximal gap versus iteration number with symbols only on descent steps.
-Uses semi-log scale by default, with option for log-log scale.
-
-# Arguments
-- `rpb::RProximalBundle`: The proximal bundle solver instance
-- `save_path=nothing`: Optional path to save the plot. If provided, saves to this path.
-- `use_loglog=false`: If true, uses log-log scale. If false (default), uses semi-log scale.
-"""
-function plot_model_proximal_gap(rpb::RProximalBundle{T}; save_path=nothing, use_loglog=false) where T
-    # Check if model proximal gap data is available
-    if isempty(rpb.model_proximal_gap_history)
-        println("Warning: No model proximal gap data available. Make sure run! has been called.")
-        return nothing
-    end
-
-    # Prepare data
-    x_data = 1:length(rpb.model_proximal_gap_history)
-    y_data = rpb.model_proximal_gap_history
-
-    # Set scale based on use_loglog parameter
-    if use_loglog
-        scale_x = :log10
-        scale_y = :log10
-        title = "Model Proximal Gap vs Iteration Number (Log-Log Scale)"
-    else
-        scale_x = :identity
-        scale_y = :identity
-        title = "Model Proximal Gap vs Iteration Number (Semi-Log Scale)"
-    end
-
-    # Create the main plot
-    p = plot(x_data, y_data,
-             label="Model Proximal Gap",
-             color="#fe6100",
-             linewidth=2,
-             title=title,
-             xlabel="Iteration Number",
-             ylabel="Model Proximal Gap",
-             xscale=scale_x,
-             yscale=scale_y,
-             dpi=300)
-
-    # Add markers ONLY for descent steps
-    if !isempty(rpb.indices_of_descent_steps)
-        valid_indices = filter(i -> i <= length(y_data), rpb.indices_of_descent_steps)
-        if !isempty(valid_indices)
-            scatter!(p, valid_indices, y_data[valid_indices],
-                    color=:green, marker=:circle, markersize=6,
-                    label="Descent Steps")
-        end
-    end
-
-    # Add grid
-    plot!(p, grid=true, gridwidth=1, gridcolor=:gray, gridalpha=0.3)
-
-    # Save plot if path is provided
-    if save_path !== nothing
-        savefig(p, save_path)
-        println("Model proximal gap plot saved to: $save_path")
-    end
-
-    display(p)
-
-    # Print summary statistics
-    println(title)
-    println("----------------------------------")
-    if !isempty(y_data)
-        println("Final Model Proximal Gap: $(y_data[end])")
-        println("Maximum Model Proximal Gap: $(maximum(y_data))")
-        println("Minimum Model Proximal Gap: $(minimum(y_data))")
-        println("Mean Model Proximal Gap: $(sum(y_data)/length(y_data))")
-        println("----------------------------------")
-        println("Total Iterations: $(length(y_data))")
-        println("Descent Steps: $(length(rpb.indices_of_descent_steps))")
-    end
-
-    return p
-end

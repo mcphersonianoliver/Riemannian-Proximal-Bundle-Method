@@ -5,7 +5,8 @@ using ColorSchemes, Plots
 using QuadraticModels, RipQP
 using Random, LinearAlgebra, LRUCache
 using Statistics
-using ManifoldDiff, Manifolds, Manopt, ManoptExamples
+using ManifoldDiff, Manifolds, Manopt, ManoptExamples, ManifoldsBase
+
 
 include("src/RiemannianProximalBundle.jl")
 using .Main: RProximalBundle, run!, plot_objective_versus_iter
@@ -45,13 +46,13 @@ isdir(results_folder) || mkpath(results_folder)
 
 # --- experiment parameters ---
 Random.seed!(42)
-num_points = 456
+num_points = 496
 sigma = 0.3 # noise level
 alpha = 0.5 # regularization parameter
 atol = 1e-8
 k_max = 0.0 # maximum sectional curvature
 k_min = -1.0 # minimum sectional curvature
-max_iter = 100_000 # maximum iterations
+max_iter = 10_000 # maximum iterations
 extended_max_iter = 1_000_000 # extended maximum iterations for sgm and rbm to find true minimum
 back_tracking_fact = 2 # backtracking factor
 
@@ -201,11 +202,182 @@ end
 proxes = (
     # Prox for (1/2n) * d^2: Results in geodesic interpolation between p and noise
     (M, lambda, p) -> ManifoldDiff.prox_distance(M, lambda, noise, p, 2),
-    
+
     # Prox for (α/n) * TV: This is a complex internal solver (like Condat-Pock)
     # that 'shrinks' the entire signal to be piecewise constant.
     (M, lambda, p) -> ManoptExamples.prox_Total_Variation(M, (alpha * lambda), p),
 )
+
+# ============================================================================
+# RipQP Logging - Using Manopt's sub_problem callback mechanism
+# ============================================================================
+using Printf: @printf
+
+# Global storage for RipQP statistics
+mutable struct RipQPStats
+    call_count::Int
+    print_frequency::Int
+    status_history::Vector{Symbol}
+    iter_history::Vector{Int}
+    primal_feas_history::Vector{Float64}
+    dual_feas_history::Vector{Float64}
+    elapsed_time_history::Vector{Float64}
+end
+
+const RIPQP_STATS = RipQPStats(0, 100, Symbol[], Int[], Float64[], Float64[], Float64[])
+
+function reset_ripqp_stats!(; frequency::Int=100)
+    RIPQP_STATS.call_count = 0
+    RIPQP_STATS.print_frequency = frequency
+    empty!(RIPQP_STATS.status_history)
+    empty!(RIPQP_STATS.iter_history)
+    empty!(RIPQP_STATS.primal_feas_history)
+    empty!(RIPQP_STATS.dual_feas_history)
+    empty!(RIPQP_STATS.elapsed_time_history)
+end
+
+"""
+    LoggingRipQP
+
+A callable struct that wraps RipQP and logs solver statistics.
+Pass this as a sub_problem to Manopt's bundle methods.
+"""
+struct LoggingRipQP end
+
+function (::LoggingRipQP)(qp; kwargs...)
+    # Call the actual RipQP solver
+    stats = RipQP.ripqp(qp; kwargs...)
+
+    # Log the results
+    RIPQP_STATS.call_count += 1
+    push!(RIPQP_STATS.status_history, stats.status)
+    push!(RIPQP_STATS.iter_history, stats.iter)
+    push!(RIPQP_STATS.primal_feas_history, Float64(stats.primal_feas))
+    push!(RIPQP_STATS.dual_feas_history, Float64(stats.dual_feas))
+    push!(RIPQP_STATS.elapsed_time_history, stats.elapsed_time)
+
+    # Print at specified frequency
+    if RIPQP_STATS.call_count % RIPQP_STATS.print_frequency == 0
+        println("  [RipQP #$(RIPQP_STATS.call_count)] " *
+                "status=$(stats.status), iter=$(stats.iter), " *
+                "primal_feas=$(round(stats.primal_feas, sigdigits=2)), " *
+                "dual_feas=$(round(stats.dual_feas, sigdigits=2))")
+    end
+
+    return stats
+end
+
+# Create singleton instance
+const LOGGING_RIPQP = LoggingRipQP()
+
+"""
+    DebugRipQPStatus <: DebugAction
+
+Debug action that prints the most recent RipQP solver status.
+"""
+mutable struct DebugRipQPStatus <: DebugAction
+    print_frequency::Int
+    io::IO
+
+    DebugRipQPStatus(; frequency::Int=1, io::IO=stdout) = new(frequency, io)
+end
+
+function (d::DebugRipQPStatus)(::AbstractManoptProblem, st::AbstractManoptSolverState, i::Int)
+    (i % d.print_frequency != 0) && return nothing
+
+    if !isempty(RIPQP_STATS.status_history)
+        status = RIPQP_STATS.status_history[end]
+        iters = RIPQP_STATS.iter_history[end]
+        pf = RIPQP_STATS.primal_feas_history[end]
+        df = RIPQP_STATS.dual_feas_history[end]
+
+        print(d.io, "RipQP[status=$status, iter=$iters, ")
+        print(d.io, "pf=$(round(pf, sigdigits=2)), ")
+        print(d.io, "df=$(round(df, sigdigits=2))] ")
+    else
+        print(d.io, "RipQP[no calls yet] ")
+    end
+
+    return nothing
+end
+
+"""
+    print_ripqp_summary()
+
+Print a summary of all RipQP calls after the optimization completes.
+"""
+function print_ripqp_summary()
+    println("\n=== RipQP Solver Summary ===")
+    println("Total QP solves: $(RIPQP_STATS.call_count)")
+
+    if !isempty(RIPQP_STATS.status_history)
+        # Count status occurrences
+        status_counts = Dict{Symbol, Int}()
+        for s in RIPQP_STATS.status_history
+            status_counts[s] = get(status_counts, s, 0) + 1
+        end
+        println("Status breakdown:")
+        for (status, count) in sort(collect(status_counts), by=x->x[2], rev=true)
+            pct = round(100 * count / length(RIPQP_STATS.status_history), digits=1)
+            println("  $status: $count ($pct%)")
+        end
+
+        # Feasibility stats
+        pf = RIPQP_STATS.primal_feas_history
+        df = RIPQP_STATS.dual_feas_history
+        println("Primal feasibility: max=$(round(maximum(pf), sigdigits=2)), mean=$(round(mean(pf), sigdigits=2))")
+        println("Dual feasibility: max=$(round(maximum(df), sigdigits=2)), mean=$(round(mean(df), sigdigits=2))")
+
+        # Check for any non-optimal solves
+        non_optimal = filter(s -> s != :first_order, RIPQP_STATS.status_history)
+        if !isempty(non_optimal)
+            println("⚠️  $(length(non_optimal)) non-optimal QP solves detected!")
+            non_opt_indices = findall(s -> s != :first_order, RIPQP_STATS.status_history)
+            if length(non_opt_indices) <= 10
+                println("  At QP calls: $non_opt_indices")
+            else
+                println("  First 10 at QP calls: $(non_opt_indices[1:10])...")
+            end
+        else
+            println("✓ All QP solves converged to first-order optimality")
+        end
+    else
+        println("No RipQP calls were logged.")
+        println("Note: The sub_problem kwarg must be set to use LoggingRipQP.")
+    end
+    println("============================\n")
+end
+
+"""
+    inspect_pba_state(st)
+
+Deep inspection of bundle method state to find QP solver location.
+Call this once after running to understand the state structure.
+"""
+function inspect_pba_state(st; depth::Int=0, max_depth::Int=3, prefix::String="")
+    depth > max_depth && return
+
+    println("$(prefix)Type: $(typeof(st))")
+
+    try
+        for fn in fieldnames(typeof(st))
+            fv = getfield(st, fn)
+            ft = typeof(fv)
+            println("$(prefix)  .$fn :: $ft")
+
+            # Recurse into solver/state/sub fields
+            if fv !== nothing && (occursin("solver", lowercase(string(fn))) ||
+                                   occursin("state", lowercase(string(fn))) ||
+                                   occursin("sub", lowercase(string(fn))))
+                inspect_pba_state(fv; depth=depth+1, max_depth=max_depth, prefix=prefix*"    ")
+            end
+        end
+    catch
+        println("$(prefix)  (cannot inspect)")
+    end
+end
+
+# ============================================================================
 
 # --- helper functions for plotting convergence ---
 """
@@ -549,6 +721,23 @@ noise = map(p -> exp(H, p, rand(H; vector_at=p, σ=sigma)), signal)
 diameter = 3 * maximum([distance(H, noise[i], noise[j]) for i in 1:length(noise), j in 1:length(noise)])
 Hn = PowerManifold(H, NestedPowerRepresentation(), length(noise))
 
+# --- polish exponential map with a projection to ensure numerical stability (optional) ---
+# 1. Define the method name
+struct ExpProjectionRetraction <: AbstractRetractionMethod end
+
+# 2. Define the behavior for the component manifold (Hyperbolic)
+# This will be applied to each H^2 inside (H^2)^n
+function ManifoldsBase.retract!(M::Hyperbolic, q, p, X, ::ExpProjectionRetraction)
+    # Step 1: Standard Exponential Map
+    exp!(M, q, p, X)
+
+     # Use the built-in point projection
+    # Using 'project(M, q)' (2 args) avoids the ambiguity error
+    # then we copy the result back into the memory 'q'
+    copyto!(q, project(M, q))
+    
+    return q
+end
 # --- Plot of ball
 
 export_orig = false  # Set to true if you want to export original data
@@ -695,7 +884,6 @@ initial_entry = (0, initial_objective, noise)
 
 # Set up manifold tools for RPB
 retraction_map = (p, v) -> retract(Hn, p, v, ExponentialRetraction())
-
 # Standard transport map (for comparison)
 transport_map = (p, q, v) -> vector_transport_to(Hn, p, v, q, ParallelTransport())
 
@@ -714,36 +902,6 @@ cppa_kwargs_phase1 = [
     :stopping_criterion => StopAfterIteration(phase1_maxiter),
 ]
 
-rcbm_kwargs_phase1 = [
-    :cache => (:LRU, [:Cost, :SubGradient], 50),
-    :diameter => diameter,
-    :domain => domf,
-    :k_max => k_max,
-    :k_min => k_min,
-    :record => [:Iteration, :Cost, :Iterate],
-    :return_state => true,
-    :stopping_criterion => StopAfterIteration(phase1_maxiter),
-]
-
-pba_kwargs_phase1 = [
-    :cache => (:LRU, [:Cost, :SubGradient], 50),
-    :record => [:Iteration, :Cost, :Iterate],
-    :return_state => true,
-    :stopping_criterion => StopAfterIteration(phase1_maxiter),
-]
-
-sgm_kwargs_phase1 = [
-    :cache => (:LRU, [:Cost, :SubGradient], 50),
-    :record => [:Iteration, :Cost, :Iterate],
-    :return_state => true,
-    :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
-    :stopping_criterion => StopAfterIteration(phase1_maxiter),
-]
-
-# Run Phase 1 with all algorithms to find approximate true minimum
-println("Phase 1: Running all algorithms to find true minimum")
-
-println("  Phase 1: CPPA")
 cppa_phase1 = cyclic_proximal_point(Hn, f, proxes, noise; cppa_kwargs_phase1...)
 cppa_min_obj = minimum([r[2] for r in get_record(cppa_phase1)])
 println("    CPPA minimum objective: $cppa_min_obj")
@@ -773,13 +931,23 @@ gap_stopping_criterion = StopWhenCostLess(true_min_estimate + PHASE2_GAP_TOL)
 # Phase 2 solver configurations
 rcbm_kwargs_phase2 = [
 :cache => (:LRU, [:Cost, :SubGradient], 50),
+:debug => [
+    :Iteration,
+    (:Cost, "F(p): %.10f "),
+    DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
+    :Stop,
+    100,
+    "\n",
+],
 :diameter => diameter,
 :domain => domf,
 :k_max => k_max,
 :k_min => k_min,
 :record => [:Iteration, :Cost, :Iterate, :X],
 :return_state => true,
-:stopping_criterion => gap_stopping_criterion | StopAfterIteration(max_iter)
+:stopping_criterion => gap_stopping_criterion | StopAfterIteration(max_iter),
+:vector_transport_method => ProjectionTransport(),
+:retraction_method => ExpProjectionRetraction(),
 ]
 
 sgm_kwargs_phase2 = [
@@ -792,16 +960,28 @@ sgm_kwargs_phase2 = [
 
 pba_kwargs_phase2 = [
 :cache => (:LRU, [:Cost, :SubGradient], 50),
+:debug => [
+    :Iteration,
+    (:Cost, "F(p): %.10f "),
+    DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
+    :Stop,
+    100,
+    "\n",
+],
 :record => [:Iteration, :Cost, :Iterate, :X],
 :return_state => true,
 :stopping_criterion => gap_stopping_criterion | StopAfterIteration(max_iter),
+:vector_transport_method => ProjectionTransport(),
+# :retraction_method => ExpProjectionRetraction(),
 ]
 
 # Run Phase 2 experiments with detailed timing
 println("Running RCBM...")
+reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
 rcbm_start_time = time()
-rcbm = convex_bundle_method(Hn, f, subgradient_of_f, noise; rcbm_kwargs_phase2...)
+rcbm = convex_bundle_method(Hn, f, subgradient_of_f, noise; rcbm_kwargs_phase2..., sub_problem=LOGGING_RIPQP)
 rcbm_end_time = time()
+print_ripqp_summary()  # Print RipQP summary for RCBM
 
 # print number of cuts in bundle enabled
 print("RCBM total time: $(rcbm_end_time - rcbm_start_time) seconds\n")
@@ -813,10 +993,14 @@ rcbm_record = [initial_entry; rcbm_record]
 # Create wall clock time record for RCBM with per-iteration average timing
 rcbm_total_time = rcbm_end_time - rcbm_start_time
 
+println("RCBM States Diagnostics: $(rcbm.state)")
+
 println("Running PBA...")
+reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
 pba_start_time = time()
-pba = proximal_bundle_method(Hn, f, subgradient_of_f, noise; pba_kwargs_phase2...)
+pba = proximal_bundle_method(Hn, f, subgradient_of_f, noise; pba_kwargs_phase2..., sub_problem=LOGGING_RIPQP)
 pba_end_time = time()
+print_ripqp_summary()  # Print RipQP summary for PBA
 
 print("PBA total time: $(pba_end_time - pba_start_time) seconds\n")
 pba_result = get_solver_result(pba)
@@ -826,6 +1010,13 @@ pba_record = [initial_entry; pba_record]
 
 # Create wall clock time record for PBA with per-iteration average timing
 pba_total_time = pba_end_time - pba_start_time
+
+println("PBA States Diagnostics: $(pba.state)")
+
+# Inspect state structure to find RipQP solver location
+println("\n=== PBA State Structure Inspection ===")
+inspect_pba_state(pba.state; max_depth=4)
+println("=== End Inspection ===\n")
 
 println("Running SGM...")
 sgm_start_time = time()
@@ -1090,101 +1281,101 @@ end
 
 
 # recover list of iterates (proximal centers)
-# pba_iterates = get_record(pba, :Iteration, :Iterate)
-# pba_search_directions = get_record(pba, :Iteration, :X)
-# rcbm_iterates = get_record(rcbm, :Iteration, :Iterate)
-# rcbm_search_directions = get_record(rcbm, :Iteration, :X)
+pba_iterates = get_record(pba, :Iteration, :Iterate)
+pba_search_directions = get_record(pba, :Iteration, :X)
+rcbm_iterates = get_record(rcbm, :Iteration, :Iterate)
+rcbm_search_directions = get_record(rcbm, :Iteration, :X)
 
-# # check if iterates are actually on the manifold for other bundle methods
-# println("\n--- Verifying PBA Geometry ---")
-# pba_p_rmse_history, pba_v_rmse_history = verify_geometry(Hn, pba_iterates, pba_search_directions; atol=1e-12)
-# println("\n--- Verifying RCBM Geometry ---")
-# rcbm_p_rmse_history, rcbm_v_rmse_history = verify_geometry(Hn, rcbm_iterates, rcbm_search_directions; atol=1e-12)
+# check if iterates are actually on the manifold for other bundle methods
+println("\n--- Verifying PBA Geometry ---")
+pba_p_rmse_history, pba_v_rmse_history = verify_geometry(Hn, pba_iterates, pba_search_directions; atol=1e-12)
+println("\n--- Verifying RCBM Geometry ---")
+rcbm_p_rmse_history, rcbm_v_rmse_history = verify_geometry(Hn, rcbm_iterates, rcbm_search_directions; atol=1e-12)
 
 # --- Run Phase 2 Again for SGM and RPB for much longer since they are fast ---
-# println("\n=== PHASE 3: Extended runs for SGM and RPB ===")
-# sgm_kwargs_phase3 = [
-#     :cache => (:LRU, [:Cost, :SubGradient], 50),
-#     :record => [:Iteration, :Cost, :Iterate],
-#     :return_state => true,
-#     :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
-#     :stopping_criterion => StopWhenCostLess(true_min_estimate + PHASE2_GAP_TOL) | StopAfterIteration(extended_max_iter),
-# ]
+println("\n=== PHASE 3: Extended runs for SGM and RPB ===")
+sgm_kwargs_phase3 = [
+    :cache => (:LRU, [:Cost, :SubGradient], 50),
+    :record => [:Iteration, :Cost, :Iterate],
+    :return_state => true,
+    :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
+    :stopping_criterion => StopWhenCostLess(true_min_estimate + PHASE2_GAP_TOL) | StopAfterIteration(extended_max_iter),
+]
 
-# rpb_kwargs_phase3 = [
-#     :max_iter => extended_max_iter,
-#     :tolerance => PHASE2_GAP_TOL,
-#     :proximal_parameter => 1.0/num_points,
-#     :trust_parameter => 0.001,
-#     :know_minimizer => true,
-#     :relative_error => false,
-#     :true_min_obj => true_min_estimate,
-# ]
+rpb_kwargs_phase3 = [
+    :max_iter => extended_max_iter,
+    :tolerance => PHASE2_GAP_TOL,
+    :proximal_parameter => 1.0/num_points,
+    :trust_parameter => 0.001,
+    :know_minimizer => true,
+    :relative_error => false,
+    :true_min_obj => true_min_estimate,
+]
 
-# # Run extended SGM
-# println("Running extended SGM...")
-# sgm_extended_start_time = time()
-# sgm_extended = subgradient_method(Hn, f, subgradient_of_f, noise;
-#     sgm_kwargs_phase3...)
-# sgm_extended_end_time = time()
-# sgm_extended_total_time = sgm_extended_end_time - sgm_extended_start_time
-# println("Extended SGM total time: $sgm_extended_total_time seconds")
-# sgm_extended_result = get_solver_result(sgm_extended)
-# sgm_extended_record = get_record(sgm_extended)
-# # Add initial entry to SGM record to match RPB
-# sgm_extended_record = [initial_entry; sgm_extended_record]
+# Run extended SGM
+println("Running extended SGM...")
+sgm_extended_start_time = time()
+sgm_extended = subgradient_method(Hn, f, subgradient_of_f, noise;
+    sgm_kwargs_phase3...)
+sgm_extended_end_time = time()
+sgm_extended_total_time = sgm_extended_end_time - sgm_extended_start_time
+println("Extended SGM total time: $sgm_extended_total_time seconds")
+sgm_extended_result = get_solver_result(sgm_extended)
+sgm_extended_record = get_record(sgm_extended)
+# Add initial entry to SGM record to match RPB
+sgm_extended_record = [initial_entry; sgm_extended_record]
 
-# # Run extended RPB
-# println("Running extended RPB...")
-# rpb_extended_start_time = time()
-# rpb_extended_solver = RProximalBundle(
-#     Hn, retraction_map, transport_map_projection,
-#     (x) -> f(Hn, x), (x) -> subgradient_of_f(Hn, x),
-#     noise, initial_objective, initial_subgradient; 
-#     max_iter=extended_max_iter, tolerance=PHASE2_GAP_TOL,
-#     proximal_parameter=1.0/num_points, trust_parameter=0.001, know_minimizer=true, relative_error=false,
-#     true_min_obj=true_min_estimate
-# )
-# run!(rpb_extended_solver)
-# rpb_extended_end_time = time()
-# rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
-# println("Extended RPB total time: $rpb_extended_total_time seconds")
+# Run extended RPB
+println("Running extended RPB...")
+rpb_extended_start_time = time()
+rpb_extended_solver = RProximalBundle(
+    Hn, retraction_map, transport_map_projection,
+    (x) -> f(Hn, x), (x) -> subgradient_of_f(Hn, x),
+    noise, initial_objective, initial_subgradient; 
+    max_iter=extended_max_iter, tolerance=PHASE2_GAP_TOL,
+    proximal_parameter=1.0/num_points, trust_parameter=0.001, know_minimizer=true, relative_error=false,
+    true_min_obj=true_min_estimate
+)
+run!(rpb_extended_solver)
+rpb_extended_end_time = time()
+rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
+println("Extended RPB total time: $rpb_extended_total_time seconds")
 
-# # Convert RPB results to match expected format (iteration, objective, iterate) tuples
-# rpb_extended_iterations = collect(0:length(rpb_extended_solver.raw_objective_history)-1)
-# rpb_extended_objectives = rpb_extended_solver.raw_objective_history
-# rpb_extended_iterates = rpb_extended_solver.proximal_center_history
-# rpb_extended_record = [(iter, obj, iterate) for (iter, obj, iterate) in zip(rpb_extended_iterations, rpb_extended_objectives, rpb_extended_iterates)]
-# rpb_extended_result = rpb_extended_solver.current_proximal_center
-# # Add initial entry to RPB record to match SGM
-# rpb_extended_record = [initial_entry; rpb_extended_record]
-# # Create wall clock time record for extended RPB with per-iteration average timing
-# rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
+# Convert RPB results to match expected format (iteration, objective, iterate) tuples
+rpb_extended_iterations = collect(0:length(rpb_extended_solver.raw_objective_history)-1)
+rpb_extended_objectives = rpb_extended_solver.raw_objective_history
+rpb_extended_iterates = rpb_extended_solver.proximal_center_history
+rpb_extended_record = [(iter, obj, iterate) for (iter, obj, iterate) in zip(rpb_extended_iterations, rpb_extended_objectives, rpb_extended_iterates)]
+rpb_extended_result = rpb_extended_solver.current_proximal_center
+# Add initial entry to RPB record to match SGM
+rpb_extended_record = [initial_entry; rpb_extended_record]
+# Create wall clock time record for extended RPB with per-iteration average timing
+rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
 
 # --- Create Plots from Extended Experiment ---
-# # SGM vs Our Bundle Method Log-Log Plots (reference and no reference line)
-# records_extended = [rpb_extended_record, sgm_extended_record]
-# method_names_extended = ["RPB (Ours)", "SGM"]
-# plot7 = plot_objective_gap_convergence(
-#     records_extended, method_names_extended, true_min_estimate;
-#     title="Hyperbolic Signal Denoising",
-#     filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog.png"),
-#     xscale_log=true,
-#     manifold_constraint_mode=2,
-#     manifold=Hn,
-#     manifold_tolerance=1e-9,
-#     show_reference=true,
-# )   
-# plot8 = plot_objective_gap_convergence(
-#     records_extended, method_names_extended, true_min_estimate;
-#     title="Hyperbolic Signal Denoising",
-#     filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog-noref.png"),
-#     xscale_log=true,
-#     manifold_constraint_mode=2,
-#     manifold=Hn,
-#     manifold_tolerance=1e-9,
-#     show_reference=false,
-# )   
+# SGM vs Our Bundle Method Log-Log Plots (reference and no reference line)
+records_extended = [rpb_extended_record, sgm_extended_record]
+method_names_extended = ["RPB (Ours)", "SGM"]
+plot7 = plot_objective_gap_convergence(
+    records_extended, method_names_extended, true_min_estimate;
+    title="Hyperbolic Signal Denoising",
+    filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog.png"),
+    xscale_log=true,
+    manifold_constraint_mode=2,
+    manifold=Hn,
+    manifold_tolerance=1e-9,
+    show_reference=true,
+)   
+plot8 = plot_objective_gap_convergence(
+    records_extended, method_names_extended, true_min_estimate;
+    title="Hyperbolic Signal Denoising",
+    filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog-noref.png"),
+    xscale_log=true,
+    manifold_constraint_mode=2,
+    manifold=Hn,
+    manifold_tolerance=1e-9,
+    show_reference=false,
+)   
 
 # print wall-clock times from phase 2 and phase 3
 println("\nWall-clock times for all methods in Phase 2:")
@@ -1193,6 +1384,6 @@ println("  RCBM total time: $rcbm_total_time seconds")
 println("  PBA total time: $pba_total_time seconds")
 println("  SGM total time: $sgm_total_time seconds")
 
-# println("\nWall-clock times for extended methods:")
-# println("  Extended RPB total time: $rpb_extended_total_time seconds")
-# println("  Extended SGM total time: $sgm_extended_total_time seconds")
+println("\nWall-clock times for extended methods:")
+println("  Extended RPB total time: $rpb_extended_total_time seconds")
+println("  Extended SGM total time: $sgm_extended_total_time seconds")
