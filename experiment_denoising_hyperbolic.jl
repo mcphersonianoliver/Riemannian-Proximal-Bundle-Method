@@ -211,142 +211,142 @@ proxes = (
 # ============================================================================
 # RipQP Logging - Using Manopt's sub_problem callback mechanism
 # ============================================================================
-using Printf: @printf
+# using Printf: @printf
 
-# Global storage for RipQP statistics
-mutable struct RipQPStats
-    call_count::Int
-    print_frequency::Int
-    status_history::Vector{Symbol}
-    iter_history::Vector{Int}
-    primal_feas_history::Vector{Float64}
-    dual_feas_history::Vector{Float64}
-    elapsed_time_history::Vector{Float64}
-end
+# # Global storage for RipQP statistics
+# mutable struct RipQPStats
+#     call_count::Int
+#     print_frequency::Int
+#     status_history::Vector{Symbol}
+#     iter_history::Vector{Int}
+#     primal_feas_history::Vector{Float64}
+#     dual_feas_history::Vector{Float64}
+#     elapsed_time_history::Vector{Float64}
+# end
 
-const RIPQP_STATS = RipQPStats(0, 100, Symbol[], Int[], Float64[], Float64[], Float64[])
+# const RIPQP_STATS = RipQPStats(0, 100, Symbol[], Int[], Float64[], Float64[], Float64[])
 
-function reset_ripqp_stats!(; frequency::Int=100)
-    RIPQP_STATS.call_count = 0
-    RIPQP_STATS.print_frequency = frequency
-    empty!(RIPQP_STATS.status_history)
-    empty!(RIPQP_STATS.iter_history)
-    empty!(RIPQP_STATS.primal_feas_history)
-    empty!(RIPQP_STATS.dual_feas_history)
-    empty!(RIPQP_STATS.elapsed_time_history)
-end
+# function reset_ripqp_stats!(; frequency::Int=100)
+#     RIPQP_STATS.call_count = 0
+#     RIPQP_STATS.print_frequency = frequency
+#     empty!(RIPQP_STATS.status_history)
+#     empty!(RIPQP_STATS.iter_history)
+#     empty!(RIPQP_STATS.primal_feas_history)
+#     empty!(RIPQP_STATS.dual_feas_history)
+#     empty!(RIPQP_STATS.elapsed_time_history)
+# end
 
-"""
-    LoggingRipQP
+# """
+#     LoggingRipQP
 
-A callable struct that wraps RipQP and logs solver statistics.
-Pass this as a sub_problem to Manopt's bundle methods.
-"""
-struct LoggingRipQP end
+# A callable struct that wraps RipQP and logs solver statistics.
+# Pass this as a sub_problem to Manopt's bundle methods.
+# """
+# struct LoggingRipQP end
 
-function (::LoggingRipQP)(qp; kwargs...)
-    # Call the actual RipQP solver
-    stats = RipQP.ripqp(qp; kwargs...)
+# function (::LoggingRipQP)(qp; kwargs...)
+#     # Call the actual RipQP solver
+#     stats = RipQP.ripqp(qp; kwargs...)
 
-    # Log the results
-    RIPQP_STATS.call_count += 1
-    push!(RIPQP_STATS.status_history, stats.status)
-    push!(RIPQP_STATS.iter_history, stats.iter)
-    push!(RIPQP_STATS.primal_feas_history, Float64(stats.primal_feas))
-    push!(RIPQP_STATS.dual_feas_history, Float64(stats.dual_feas))
-    push!(RIPQP_STATS.elapsed_time_history, stats.elapsed_time)
+#     # Log the results
+#     RIPQP_STATS.call_count += 1
+#     push!(RIPQP_STATS.status_history, stats.status)
+#     push!(RIPQP_STATS.iter_history, stats.iter)
+#     push!(RIPQP_STATS.primal_feas_history, Float64(stats.primal_feas))
+#     push!(RIPQP_STATS.dual_feas_history, Float64(stats.dual_feas))
+#     push!(RIPQP_STATS.elapsed_time_history, stats.elapsed_time)
 
-    # Print at specified frequency
-    if RIPQP_STATS.call_count % RIPQP_STATS.print_frequency == 0
-        println("  [RipQP #$(RIPQP_STATS.call_count)] " *
-                "status=$(stats.status), iter=$(stats.iter), " *
-                "primal_feas=$(round(stats.primal_feas, sigdigits=2)), " *
-                "dual_feas=$(round(stats.dual_feas, sigdigits=2))")
-    end
+#     # Print at specified frequency
+#     if RIPQP_STATS.call_count % RIPQP_STATS.print_frequency == 0
+#         println("  [RipQP #$(RIPQP_STATS.call_count)] " *
+#                 "status=$(stats.status), iter=$(stats.iter), " *
+#                 "primal_feas=$(round(stats.primal_feas, sigdigits=2)), " *
+#                 "dual_feas=$(round(stats.dual_feas, sigdigits=2))")
+#     end
 
-    return stats
-end
+#     return stats
+# end
 
-# Create singleton instance
-const LOGGING_RIPQP = LoggingRipQP()
+# # Create singleton instance
+# const LOGGING_RIPQP = LoggingRipQP()
 
-"""
-    DebugRipQPStatus <: DebugAction
+# """
+#     DebugRipQPStatus <: DebugAction
 
-Debug action that prints the most recent RipQP solver status.
-"""
-mutable struct DebugRipQPStatus <: DebugAction
-    print_frequency::Int
-    io::IO
+# Debug action that prints the most recent RipQP solver status.
+# """
+# mutable struct DebugRipQPStatus <: DebugAction
+#     print_frequency::Int
+#     io::IO
 
-    DebugRipQPStatus(; frequency::Int=1, io::IO=stdout) = new(frequency, io)
-end
+#     DebugRipQPStatus(; frequency::Int=1, io::IO=stdout) = new(frequency, io)
+# end
 
-function (d::DebugRipQPStatus)(::AbstractManoptProblem, st::AbstractManoptSolverState, i::Int)
-    (i % d.print_frequency != 0) && return nothing
+# function (d::DebugRipQPStatus)(::AbstractManoptProblem, st::AbstractManoptSolverState, i::Int)
+#     (i % d.print_frequency != 0) && return nothing
 
-    if !isempty(RIPQP_STATS.status_history)
-        status = RIPQP_STATS.status_history[end]
-        iters = RIPQP_STATS.iter_history[end]
-        pf = RIPQP_STATS.primal_feas_history[end]
-        df = RIPQP_STATS.dual_feas_history[end]
+#     if !isempty(RIPQP_STATS.status_history)
+#         status = RIPQP_STATS.status_history[end]
+#         iters = RIPQP_STATS.iter_history[end]
+#         pf = RIPQP_STATS.primal_feas_history[end]
+#         df = RIPQP_STATS.dual_feas_history[end]
 
-        print(d.io, "RipQP[status=$status, iter=$iters, ")
-        print(d.io, "pf=$(round(pf, sigdigits=2)), ")
-        print(d.io, "df=$(round(df, sigdigits=2))] ")
-    else
-        print(d.io, "RipQP[no calls yet] ")
-    end
+#         print(d.io, "RipQP[status=$status, iter=$iters, ")
+#         print(d.io, "pf=$(round(pf, sigdigits=2)), ")
+#         print(d.io, "df=$(round(df, sigdigits=2))] ")
+#     else
+#         print(d.io, "RipQP[no calls yet] ")
+#     end
 
-    return nothing
-end
+#     return nothing
+# end
 
-"""
-    print_ripqp_summary()
+# """
+#     print_ripqp_summary()
 
-Print a summary of all RipQP calls after the optimization completes.
-"""
-function print_ripqp_summary()
-    println("\n=== RipQP Solver Summary ===")
-    println("Total QP solves: $(RIPQP_STATS.call_count)")
+# Print a summary of all RipQP calls after the optimization completes.
+# """
+# function print_ripqp_summary()
+#     println("\n=== RipQP Solver Summary ===")
+#     println("Total QP solves: $(RIPQP_STATS.call_count)")
 
-    if !isempty(RIPQP_STATS.status_history)
-        # Count status occurrences
-        status_counts = Dict{Symbol, Int}()
-        for s in RIPQP_STATS.status_history
-            status_counts[s] = get(status_counts, s, 0) + 1
-        end
-        println("Status breakdown:")
-        for (status, count) in sort(collect(status_counts), by=x->x[2], rev=true)
-            pct = round(100 * count / length(RIPQP_STATS.status_history), digits=1)
-            println("  $status: $count ($pct%)")
-        end
+#     if !isempty(RIPQP_STATS.status_history)
+#         # Count status occurrences
+#         status_counts = Dict{Symbol, Int}()
+#         for s in RIPQP_STATS.status_history
+#             status_counts[s] = get(status_counts, s, 0) + 1
+#         end
+#         println("Status breakdown:")
+#         for (status, count) in sort(collect(status_counts), by=x->x[2], rev=true)
+#             pct = round(100 * count / length(RIPQP_STATS.status_history), digits=1)
+#             println("  $status: $count ($pct%)")
+#         end
 
-        # Feasibility stats
-        pf = RIPQP_STATS.primal_feas_history
-        df = RIPQP_STATS.dual_feas_history
-        println("Primal feasibility: max=$(round(maximum(pf), sigdigits=2)), mean=$(round(mean(pf), sigdigits=2))")
-        println("Dual feasibility: max=$(round(maximum(df), sigdigits=2)), mean=$(round(mean(df), sigdigits=2))")
+#         # Feasibility stats
+#         pf = RIPQP_STATS.primal_feas_history
+#         df = RIPQP_STATS.dual_feas_history
+#         println("Primal feasibility: max=$(round(maximum(pf), sigdigits=2)), mean=$(round(mean(pf), sigdigits=2))")
+#         println("Dual feasibility: max=$(round(maximum(df), sigdigits=2)), mean=$(round(mean(df), sigdigits=2))")
 
-        # Check for any non-optimal solves
-        non_optimal = filter(s -> s != :first_order, RIPQP_STATS.status_history)
-        if !isempty(non_optimal)
-            println("⚠️  $(length(non_optimal)) non-optimal QP solves detected!")
-            non_opt_indices = findall(s -> s != :first_order, RIPQP_STATS.status_history)
-            if length(non_opt_indices) <= 10
-                println("  At QP calls: $non_opt_indices")
-            else
-                println("  First 10 at QP calls: $(non_opt_indices[1:10])...")
-            end
-        else
-            println("✓ All QP solves converged to first-order optimality")
-        end
-    else
-        println("No RipQP calls were logged.")
-        println("Note: The sub_problem kwarg must be set to use LoggingRipQP.")
-    end
-    println("============================\n")
-end
+#         # Check for any non-optimal solves
+#         non_optimal = filter(s -> s != :first_order, RIPQP_STATS.status_history)
+#         if !isempty(non_optimal)
+#             println("⚠️  $(length(non_optimal)) non-optimal QP solves detected!")
+#             non_opt_indices = findall(s -> s != :first_order, RIPQP_STATS.status_history)
+#             if length(non_opt_indices) <= 10
+#                 println("  At QP calls: $non_opt_indices")
+#             else
+#                 println("  First 10 at QP calls: $(non_opt_indices[1:10])...")
+#             end
+#         else
+#             println("✓ All QP solves converged to first-order optimality")
+#         end
+#     else
+#         println("No RipQP calls were logged.")
+#         println("Note: The sub_problem kwarg must be set to use LoggingRipQP.")
+#     end
+#     println("============================\n")
+# end
 
 """
     inspect_pba_state(st)
@@ -934,7 +934,7 @@ rcbm_kwargs_phase2 = [
 :debug => [
     :Iteration,
     (:Cost, "F(p): %.10f "),
-    DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
+    # DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
     :Stop,
     100,
     "\n",
@@ -963,7 +963,7 @@ pba_kwargs_phase2 = [
 :debug => [
     :Iteration,
     (:Cost, "F(p): %.10f "),
-    DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
+    # DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
     :Stop,
     100,
     "\n",
@@ -977,11 +977,11 @@ pba_kwargs_phase2 = [
 
 # Run Phase 2 experiments with detailed timing
 println("Running RCBM...")
-reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
+# reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
 rcbm_start_time = time()
-rcbm = convex_bundle_method(Hn, f, subgradient_of_f, noise; rcbm_kwargs_phase2..., sub_problem=LOGGING_RIPQP)
+rcbm = convex_bundle_method(Hn, f, subgradient_of_f, noise; rcbm_kwargs_phase2...)
 rcbm_end_time = time()
-print_ripqp_summary()  # Print RipQP summary for RCBM
+# print_ripqp_summary()  # Print RipQP summary for RCBM
 
 # print number of cuts in bundle enabled
 print("RCBM total time: $(rcbm_end_time - rcbm_start_time) seconds\n")
@@ -996,11 +996,11 @@ rcbm_total_time = rcbm_end_time - rcbm_start_time
 println("RCBM States Diagnostics: $(rcbm.state)")
 
 println("Running PBA...")
-reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
+# reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
 pba_start_time = time()
-pba = proximal_bundle_method(Hn, f, subgradient_of_f, noise; pba_kwargs_phase2..., sub_problem=LOGGING_RIPQP)
+pba = proximal_bundle_method(Hn, f, subgradient_of_f, noise; pba_kwargs_phase2...)
 pba_end_time = time()
-print_ripqp_summary()  # Print RipQP summary for PBA
+# print_ripqp_summary()  # Print RipQP summary for PBA
 
 print("PBA total time: $(pba_end_time - pba_start_time) seconds\n")
 pba_result = get_solver_result(pba)
