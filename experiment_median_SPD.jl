@@ -2,7 +2,7 @@
 using PrettyTables
 using BenchmarkTools, Statistics
 using CSV, DataFrames
-using ColorSchemes, Plots
+using ColorSchemes, Plots, Plots.PlotMeasures, LaTeXStrings
 using QuadraticModels, RipQP
 using LinearAlgebra, LRUCache, Random
 using ManifoldDiff, Manifolds, Manopt, ManoptExamples
@@ -10,9 +10,29 @@ using ManifoldDiff, Manifolds, Manopt, ManoptExamples
 # Include custom Riemannian Proximal Bundle solver
 include("src/RiemannianProximalBundle.jl")
 
+pgfplotsx()
+
 # Helper function for inner product (used by RPB solver)
 function inner_product(M, p, X, Y)
     return inner(M, p, X, Y)
+end
+
+# Custom first-order retraction for SPD manifold: R_p(X) = proj_SPD(p + X)
+# Note: ManifoldsBase v2 dispatch is retract! → _retract! (5-arg only, no t parameter).
+# The caller pre-scales X, so we define the 5-arg form to intercept before _retract!.
+struct FirstOrderSPDRetraction <: AbstractRetractionMethod end
+
+function Manifolds.retract!(::SymmetricPositiveDefinite, q, p, X, ::FirstOrderSPDRetraction)
+    @. q = p + X
+    q .= (q + q') / 2
+    try
+        cholesky(q)
+    catch
+        F = eigen(q)
+        F.values .= max.(F.values, 1e-12)
+        q .= F.vectors * Diagonal(F.values) * F.vectors'
+    end
+    return q
 end
 
 # --- feature flags (top of file) ---
@@ -22,8 +42,8 @@ const export_table  = "--export" in ARGS || get(ENV, "EXPORT_TABLE", "") == "1"
 # Two-phase experiment configuration
 const TWO_PHASE_MODE = true  # Set to false to run old single-phase experiment
 const PHASE1_MULTIPLIER = 2  # Run Phase 1 for this many times the normal iterations
-const PHASE2_GAP_TOL = 1e-8  # Stop Phase 2 when objective gap reaches this tolerance
-maxiter = 2500  # Maximum iterations for single-phase or Phase 2
+const PHASE2_GAP_TOL = 1e-12 # Stop Phase 2 when objective gap reaches this tolerance
+maxiter = 1000  # Maximum iterations for single-phase or Phase 2
 
 println("Configuration:")
 println("  Benchmarking: $benchmarking")
@@ -37,13 +57,13 @@ println()
 
 
 # initialize parameters of experiment
-experiment_name = "RCBM-Median"
+experiment_name = "RCBM-Median-20-Points"
 results_folder = joinpath(@__DIR__, experiment_name)
 !isdir(results_folder) && mkdir(results_folder)
 seed_argument = 57
 
-atol = 1e-8
-N = 500 # number of data points
+atol = 1e-12
+N = 20 # number of data points
 spd_dims = [3, 5, 15, 30, 55]
 
 # Generate a point that is at most `tol` close to the point `p` on `M`
@@ -240,57 +260,66 @@ function plot_objective_gap_convergence(records, method_names, dimension, true_m
                                        filename=nothing,
                                        wallclock=false,
                                        wallclock_times=nothing,
-                                       offset_iterations=false)
+                                       offset_iterations=false,
+                                       ylims_lower=nothing,
+                                       max_x=nothing)
     # Set default titles and labels based on plot type
-    if title === nothing
-        title = "Riemannian Median: SPD $dimension × $dimension Matrices"
-    end
+    # if title === nothing
+    #     title = latexstring("\\textrm{Riemannian Median: SPD } $dimension \\times $dimension \\textrm{ Matrices}")
+    # end
     if ylabel === nothing
-        ylabel = "Minimum Objective Gap"
+        ylabel = L"\textrm{Minimum Objective Gap}"
     end
     if xlabel === nothing
-        xlabel = wallclock ? "Time (seconds)" : "Oracle Calls"
+        xlabel = wallclock ? L"\textrm{Time (seconds)}" : L"\textrm{Oracle Calls}"
     end
 
     # Initialize plot
     p = plot(
         xlabel=xlabel,
         ylabel=ylabel,
-        title=title,
         yscale=:log10,
         legend=:topright,
-        background_color_legend=:transparent,
-        foreground_color_legend=:transparent,
+        size=(600, 400),
+        guidefontsize=12,
+        tickfontsize=10,
+        legendfontsize=10,
+        background_color_legend=:white,
+        foreground_color_legend=:black,
         grid=true,
         linewidth=wallclock ? 2 : 1,
-        dpi=300
+        margin=5mm,
+        extra_kwargs=Dict(:subplot => Dict("width" => raw"12cm", "height" => raw"8cm")),
     )
 
     # Define color map for methods (same style as experiment_denoising_hyperbolic.jl)
+    # FO variants share the same color as their exponential counterparts
     color_map = Dict(
-        "RPB (Ours)" => "#785ef0",    # Purple
-        "RPB-FO (Ours)" => "#785ef0", # Purple (but with dash line style)
-        "RCBM" => "#fe6100",          # Orange
-        "PBA" => "#dc267f",           # Pink/Magenta
-        "SGM" => "#ffb000",           # Gold/Yellow
-        "RPB" => "#785ef0",           # Purple (alias for RPB (Ours))
-        "RPB-FO" => "#785ef0",        # Purple (alias for RPB-FO (Ours))
+        L"\textrm{RPB (Ours)}" => "#785ef0",    # Purple
+        L"\textrm{RPB-FO (Ours)}" => "#785ef0", # Purple (dashed)
+        L"\textrm{RCBM}" => "#fe6100",          # Orange
+        L"\textrm{RCBM-FO}" => "#fe6100",       # Orange (dashed)
+        L"\textrm{PBA}" => "#dc267f",           # Pink/Magenta
+        L"\textrm{PBA-FO}" => "#dc267f",        # Pink/Magenta (dashed)
+        L"\textrm{SGM}" => "#ffb000",           # Gold/Yellow
+        L"\textrm{SGM-FO}" => "#ffb000",        # Gold/Yellow (dashed)
     )
     # Fallback colors if method not found in map
     fallback_colors = ["#785ef0", "#dc267f", "#fe6100", "#ffb000", "#333333"]
 
-    # Define line style map for methods
+    # Define line style map: solid for exponential, dashed for first-order
     line_style_map = Dict(
-        "RPB (Ours)" => :solid,
-        "RPB-FO (Ours)" => :dash,     # Dashed line for first-order RPB
-        "RCBM" => :solid,
-        "PBA" => :solid,
-        "SGM" => :solid,
-        "RPB" => :solid,              # Alias for RPB (Ours)
-        "RPB-FO" => :dash,            # Alias for RPB-FO (Ours)
+        L"\textrm{RPB (Ours)}" => :solid,
+        L"\textrm{RPB-FO (Ours)}" => :dash,
+        L"\textrm{RCBM}" => :solid,
+        L"\textrm{RCBM-FO}" => :dash,
+        L"\textrm{PBA}" => :solid,
+        L"\textrm{PBA-FO}" => :dash,
+        L"\textrm{SGM}" => :solid,
+        L"\textrm{SGM-FO}" => :dash,
     )
     # Fallback line styles
-    fallback_line_styles = [:solid, :dash, :solid, :solid, :solid]
+    fallback_line_styles = [:solid, :dash, :solid, :dash, :solid, :dash, :solid, :dash]
 
     if wallclock && wallclock_times !== nothing
         # Wall-clock time plotting with time_records
@@ -306,7 +335,7 @@ function plot_objective_gap_convergence(records, method_names, dimension, true_m
         end
 
         # Calculate 15% of the longest time duration
-        time_cutoff_global = 0.15 * max_time_across_all
+        time_cutoff_global = 1 * max_time_across_all
 
         for (i, (time_record, name)) in enumerate(zip(time_records, method_names))
             if !isempty(time_record)
@@ -326,17 +355,24 @@ function plot_objective_gap_convergence(records, method_names, dimension, true_m
                 valid_times = times_limited[valid_indices]
                 valid_gaps = min_gaps_limited[valid_indices]
 
+                # Downsample to at most 2000 points per line
+                n_pts = length(valid_times)
+                if n_pts > 2000
+                    stride = cld(n_pts, 2000)
+                    valid_times = valid_times[1:stride:end]
+                    valid_gaps = valid_gaps[1:stride:end]
+                end
+
                 if !isempty(valid_times)
                     plot_color = get(color_map, name, fallback_colors[mod1(i, length(fallback_colors))])
                     plot_linestyle = get(line_style_map, name, fallback_line_styles[mod1(i, length(fallback_line_styles))])
+                    # Suppress legend entry for FO variants (solid vs dashed explained in caption)
+                    plot_label = contains(string(name), "-FO") ? "" : name
                     plot!(p, valid_times, valid_gaps,
-                          label=name,
+                          label=plot_label,
                           color=plot_color,
                           linestyle=plot_linestyle,
-                          linewidth=2,
-                          markershape=:circle,
-                          markersize=2,
-                          markerstrokewidth=0)
+                          linewidth=2)
                 end
             end
         end
@@ -351,7 +387,7 @@ function plot_objective_gap_convergence(records, method_names, dimension, true_m
         end
 
         # Calculate 15% of the longest iteration amount
-        max_iter_idx_global = max(1, Int(ceil(0.15 * max_iterations_across_all)))
+        max_iter_idx_global = max(1, Int(ceil(1 * max_iterations_across_all)))
 
         for (i, (record, name)) in enumerate(zip(records, method_names))
             if !isempty(record)
@@ -379,19 +415,42 @@ function plot_objective_gap_convergence(records, method_names, dimension, true_m
                 valid_iterations = iterations_limited[valid_indices]
                 valid_gaps = min_gaps_limited[valid_indices]
 
+                # Downsample to at most 2000 points per line
+                n_pts = length(valid_iterations)
+                if n_pts > 2000
+                    stride = cld(n_pts, 2000)
+                    valid_iterations = valid_iterations[1:stride:end]
+                    valid_gaps = valid_gaps[1:stride:end]
+                end
+
                 if !isempty(valid_iterations)
                     plot_color = get(color_map, name, fallback_colors[mod1(i, length(fallback_colors))])
+                    plot_linestyle = get(line_style_map, name, fallback_line_styles[mod1(i, length(fallback_line_styles))])
+                    # Suppress legend entry for FO variants (solid vs dashed explained in caption)
+                    plot_label = contains(string(name), "-FO") ? "" : name
+
                     plot!(p, valid_iterations, valid_gaps,
-                          label=name,
-                          color=plot_color,
-                          linestyle=line_styles[mod1(i, length(line_styles))],
-                          linewidth=2,
-                          markershape=:circle,
-                          markersize=2,
-                          markerstrokewidth=0)
+                        label=plot_label,
+                        color=plot_color,
+                        linestyle=plot_linestyle,
+                        linewidth=1)
                 end
             end
         end
+    end
+
+    # Apply axis limits
+    if ylims_lower !== nothing
+        current_ylims = Plots.ylims(p)
+        ylims!(p, (ylims_lower, current_ylims[2]))
+    end
+    # X-axis: start at first iteration number (1 for offset iterations, 0 for wallclock/non-offset)
+    x_start = (!wallclock && offset_iterations) ? 1 : 0
+    if max_x !== nothing
+        xlims!(p, (x_start, max_x))
+    else
+        current_xlims = Plots.xlims(p)
+        xlims!(p, (x_start, current_xlims[2]))
     end
 
     if filename !== nothing
@@ -591,13 +650,14 @@ for n in spd_dims
         println("Phase 2: RCBM")
         rcbm_start_time = time()
         rcbm = convex_bundle_method(M, f_spd, ∂f_spd, p0; rcbm_kwargs_phase2...)
+        rcbm_end_time = time()
         rcbm_result = get_solver_result(rcbm)
         rcbm_record_raw = get_record(rcbm)
         rcbm_record = vcat([initial_entry], rcbm_record_raw)
 
         # Create time-based record for RCBM
         rcbm_times = [0.0]  # Start at time 0
-        rcbm_time_step = (time() - rcbm_start_time) / length(rcbm_record_raw)
+        rcbm_time_step = (rcbm_end_time - rcbm_start_time) / length(rcbm_record_raw)
         for i in 1:length(rcbm_record_raw)
             push!(rcbm_times, i * rcbm_time_step)
         end
@@ -606,13 +666,14 @@ for n in spd_dims
         println("Phase 2: PBA")
         pba_start_time = time()
         pba = proximal_bundle_method(M, f_spd, ∂f_spd, p0; pba_kwargs_phase2...)
+        pba_end_time = time()
         pba_result = get_solver_result(pba)
         pba_record_raw = get_record(pba)
         pba_record = vcat([initial_entry], pba_record_raw)
 
         # Create time-based record for PBA
         pba_times = [0.0]  # Start at time 0
-        pba_time_step = (time() - pba_start_time) / length(pba_record_raw)
+        pba_time_step = (pba_end_time - pba_start_time) / length(pba_record_raw)
         for i in 1:length(pba_record_raw)
             push!(pba_times, i * pba_time_step)
         end
@@ -623,7 +684,6 @@ for n in spd_dims
         initial_subgrad = ∂f_spd(M, p0)
 
         # RPB with gap tolerance as stopping criterion
-        rpb_start_time = time()
         rpb_solver = RProximalBundle(
             M, retraction_exp, transport_exp,
             (x) -> f_spd(M, x), (x) -> ∂f_spd(M, x),
@@ -633,7 +693,9 @@ for n in spd_dims
             adaptive_proximal=true, know_minimizer=true, relative_error=false,
             true_min_obj=true_min_estimate
         )
+        rpb_start_time = time()
         run!(rpb_solver)
+        rpb_end_time = time()
 
         # Convert RPB results to match expected format (iteration, objective) pairs
         # Use raw_objective_history instead of objective_history (which contains gaps)
@@ -642,13 +704,12 @@ for n in spd_dims
         rpb_record = [(iter, obj) for (iter, obj) in zip(rpb_iterations, rpb_objectives)]
 
         # Create time-based record for RPB
-        rpb_total_time = time() - rpb_start_time
+        rpb_total_time = rpb_end_time - rpb_start_time
         rpb_time_step = rpb_total_time / (length(rpb_solver.raw_objective_history) - 1)
         rpb_time_record = [(i * rpb_time_step, rpb_solver.raw_objective_history[i+1]) for i in 0:length(rpb_solver.raw_objective_history)-1]
 
         println("Phase 2: RPB (First-Order + Projection)")
         # RPB with first-order retraction and projection transport
-        rpb_fo_start_time = time()
         rpb_fo_solver = RProximalBundle(
             M, retraction_first_order, transport_projection,
             (x) -> f_spd(M, x), (x) -> ∂f_spd(M, x),
@@ -659,7 +720,9 @@ for n in spd_dims
             adaptive_proximal=true, know_minimizer=true, relative_error=false,
             true_min_obj=true_min_estimate
         )
+        rpb_fo_start_time = time()
         run!(rpb_fo_solver)
+        rpb_fo_end_time = time()
 
         # Convert RPB first-order results to match expected format
         rpb_fo_iterations = collect(0:length(rpb_fo_solver.raw_objective_history)-1)
@@ -667,13 +730,14 @@ for n in spd_dims
         rpb_fo_record = [(iter, obj) for (iter, obj) in zip(rpb_fo_iterations, rpb_fo_objectives)]
 
         # Create time-based record for RPB first-order
-        rpb_fo_total_time = time() - rpb_fo_start_time
+        rpb_fo_total_time = rpb_fo_end_time - rpb_fo_start_time
         rpb_fo_time_step = rpb_fo_total_time / (length(rpb_fo_solver.raw_objective_history) - 1)
         rpb_fo_time_record = [(i * rpb_fo_time_step, rpb_fo_solver.raw_objective_history[i+1]) for i in 0:length(rpb_fo_solver.raw_objective_history)-1]
 
         println("Phase 2: SGM")
         sgm_start_time = time()
         sgm = subgradient_method(M, f_spd, ∂f_spd, p0; sgm_kwargs_phase2...)
+        sgm_end_time = time()
         sgm_result = get_solver_result(sgm)
         sgm_record_raw = get_record(sgm)
         sgm_record = vcat([initial_entry], sgm_record_raw)
@@ -686,83 +750,160 @@ for n in spd_dims
         end
         sgm_time_record = [(sgm_times[i], sgm_record[i][2]) for i in 1:length(sgm_record)]
 
+        # --- First-order retraction Phase 2 runs ---
+        println("Phase 2: RCBM-FO")
+        rcbm_fo_start_time = time()
+        rcbm_fo = convex_bundle_method(M, f_spd, ∂f_spd, p0; rcbm_kwargs_phase2...,
+            retraction_method=FirstOrderSPDRetraction(), vector_transport_method=ProjectionTransport())
+        rcbm_fo_end_time = time()
+        rcbm_fo_result = get_solver_result(rcbm_fo)
+        rcbm_fo_record_raw = get_record(rcbm_fo)
+        rcbm_fo_record = vcat([initial_entry], rcbm_fo_record_raw)
+
+        # Create time-based record for RCBM-FO
+        rcbm_fo_times = [0.0]
+        rcbm_fo_time_step = (rcbm_fo_end_time - rcbm_fo_start_time) / length(rcbm_fo_record_raw)
+        for i in 1:length(rcbm_fo_record_raw)
+            push!(rcbm_fo_times, i * rcbm_fo_time_step)
+        end
+        rcbm_fo_time_record = [(rcbm_fo_times[i], rcbm_fo_record[i][2]) for i in 1:length(rcbm_fo_record)]
+
+        println("Phase 2: PBA-FO")
+        pba_fo_start_time = time()
+        pba_fo = proximal_bundle_method(M, f_spd, ∂f_spd, p0; pba_kwargs_phase2...,
+            retraction_method=FirstOrderSPDRetraction(), vector_transport_method=ProjectionTransport())
+        pba_fo_end_time = time()
+        pba_fo_result = get_solver_result(pba_fo)
+        pba_fo_record_raw = get_record(pba_fo)
+        pba_fo_record = vcat([initial_entry], pba_fo_record_raw)
+
+        # Create time-based record for PBA-FO
+        pba_fo_times = [0.0]
+        pba_fo_time_step = (pba_fo_end_time - pba_fo_start_time) / length(pba_fo_record_raw)
+        for i in 1:length(pba_fo_record_raw)
+            push!(pba_fo_times, i * pba_fo_time_step)
+        end
+        pba_fo_time_record = [(pba_fo_times[i], pba_fo_record[i][2]) for i in 1:length(pba_fo_record)]
+
+        println("Phase 2: SGM-FO")
+        sgm_fo_start_time = time()
+        sgm_fo = subgradient_method(M, f_spd, ∂f_spd, p0; sgm_kwargs_phase2...,
+            retraction_method=FirstOrderSPDRetraction())
+        sgm_fo_end_time = time()
+        sgm_fo_result = get_solver_result(sgm_fo)
+        sgm_fo_record_raw = get_record(sgm_fo)
+        sgm_fo_record = vcat([initial_entry], sgm_fo_record_raw)
+
+        # Create time-based record for SGM-FO
+        sgm_fo_times = [0.0]
+        sgm_fo_time_step = (sgm_fo_end_time - sgm_fo_start_time) / length(sgm_fo_record_raw)
+        for i in 1:length(sgm_fo_record_raw)
+            push!(sgm_fo_times, i * sgm_fo_time_step)
+        end
+        sgm_fo_time_record = [(sgm_fo_times[i], sgm_fo_record[i][2]) for i in 1:length(sgm_fo_record)]
+
         println("Phase 2 complete. SPD dimension $n")
 
-        records = [
-            rpb_record,
-            rpb_fo_record,
-            rcbm_record,
-            pba_record,
-            sgm_record,
+        # --- Assemble records for all methods ---
+        # Order: exponential methods paired with their FO counterparts
+        records_all = [
+            rpb_record, rpb_fo_record,
+            rcbm_record, rcbm_fo_record,
+            pba_record, pba_fo_record,
+            sgm_record, sgm_fo_record,
+        ]
+        time_records_all = [
+            rpb_time_record, rpb_fo_time_record,
+            rcbm_time_record, rcbm_fo_time_record,
+            pba_time_record, pba_fo_time_record,
+            sgm_time_record, sgm_fo_time_record,
+        ]
+        method_names_all = [
+            L"\textrm{RPB (Ours)}", L"\textrm{RPB-FO (Ours)}",
+            L"\textrm{RCBM}", L"\textrm{RCBM-FO}",
+            L"\textrm{PBA}", L"\textrm{PBA-FO}",
+            L"\textrm{SGM}", L"\textrm{SGM-FO}",
         ]
 
-        time_records = [
-            rpb_time_record,
-            rpb_fo_time_record,
-            rcbm_time_record,
-            pba_time_record,
-            sgm_time_record,
+        # No-PBA subset (exclude PBA and PBA-FO)
+        nopba_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "PBA")]
+        records_nopba = records_all[nopba_indices]
+        time_records_nopba = time_records_all[nopba_indices]
+        method_names_nopba = method_names_all[nopba_indices]
+
+        # Bundles-only subset (exclude SGM and SGM-FO)
+        bundles_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "SGM")]
+        records_bundles = records_all[bundles_indices]
+        time_records_bundles = time_records_all[bundles_indices]
+        method_names_bundles = method_names_all[bundles_indices]
+
+        # --- Compute 5× shortest method cutoffs for "short" plots ---
+        # Iteration-based: shortest = fewest records
+        shortest_iter_all = minimum(length(r) for r in records_all)
+        iter_cutoff_all = 5 * shortest_iter_all
+        shortest_iter_nopba = minimum(length(r) for r in records_nopba)
+        iter_cutoff_nopba = 5 * shortest_iter_nopba
+        shortest_iter_bundles = minimum(length(r) for r in records_bundles)
+        iter_cutoff_bundles = 5 * shortest_iter_bundles
+
+        # Wall-clock: shortest = smallest max time
+        shortest_time_all = minimum(maximum(r[1] for r in tr) for tr in time_records_all)
+        time_cutoff_all = 5 * shortest_time_all
+        shortest_time_nopba = minimum(maximum(r[1] for r in tr) for tr in time_records_nopba)
+        time_cutoff_nopba = 5 * shortest_time_nopba
+        shortest_time_bundles = minimum(maximum(r[1] for r in tr) for tr in time_records_bundles)
+        time_cutoff_bundles = 5 * shortest_time_bundles
+
+        # --- Generate plots ---
+        # For each plot type, create: all methods (full + short), no-PBA (full + short)
+        for (subset_name, rec, trec, names, iter_cut, time_cut) in [
+            ("", records_all, time_records_all, method_names_all, iter_cutoff_all, time_cutoff_all),
+            ("_nopba", records_nopba, time_records_nopba, method_names_nopba, iter_cutoff_nopba, time_cutoff_nopba),
+            ("_bundles", records_bundles, time_records_bundles, method_names_bundles, iter_cutoff_bundles, time_cutoff_bundles),
         ]
+            # Convergence gap (offset iterations = oracle calls)
+            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
+                filename=joinpath(results_folder, "convergence_gap$(subset_name)_spd_$(n)x$(n).pdf"),
+                offset_iterations=true, ylims_lower=atol)
+            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
+                filename=joinpath(results_folder, "convergence_gap$(subset_name)_short_spd_$(n)x$(n).pdf"),
+                offset_iterations=true, ylims_lower=atol, max_x=iter_cut)
 
-        ## Create plots including all methods
-        method_names = ["RPB (Ours)", "RPB-FO (Ours)", "RCBM", "PBA", "SGM"]
+            # Semi-log (no offset)
+            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
+                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_spd_$(n)x$(n).pdf"),
+                offset_iterations=false, ylims_lower=atol)
+            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
+                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_short_spd_$(n)x$(n).pdf"),
+                offset_iterations=false, ylims_lower=atol, max_x=iter_cut)
 
-        # Create objective gap convergence plot
-        plot_filename = joinpath(results_folder, "convergence_gap_spd_$(n)x$(n).png")
-        plot_objective_gap_convergence(records, method_names, n, true_min_estimate; filename=plot_filename, offset_iterations=true)
-
-        # Also create semi-log plot for comparison
-        plot_filename_semilog = joinpath(results_folder, "convergence_semilog_spd_$(n)x$(n).png")
-        plot_objective_gap_convergence(records, method_names, n, true_min_estimate; filename=plot_filename_semilog, offset_iterations=false)
-
-        # Create wall-clock time vs objective gap plot
-        plot_filename_wallclock = joinpath(results_folder, "wallclock_gap_spd_$(n)x$(n).png")
-        plot_objective_gap_convergence(time_records, method_names, n, true_min_estimate; filename=plot_filename_wallclock, wallclock=true, wallclock_times=[rpb_total_time, rpb_fo_total_time, time() - rcbm_start_time, time() - pba_start_time, time() - sgm_start_time])
-
-        ## Create plots only including just the bundle methods
-        records_bundles_only = [
-            rpb_record,
-            rpb_fo_record,
-            rcbm_record,
-            pba_record,
-        ]
-
-        method_names_bundles_only = ["RPB (Ours)", "RPB-FO (Ours)", "RCBM", "PBA"]
-        # Create objective gap convergence plot for
-        plot_filename_bundles = joinpath(results_folder, "convergence_gap_bundles_spd_$(n)x$(n).png")
-        plot_objective_gap_convergence(records_bundles_only, method_names_bundles_only, n, true_min_estimate; filename=plot_filename_bundles, offset_iterations=true)
-
-        # Also create traditional semi-log plot for bundles only
-        plot_filename_semilog_bundles = joinpath(results_folder, "convergence_semilog_bundles_spd_$(n)x$(n).png")
-        plot_objective_gap_convergence(records_bundles_only, method_names_bundles_only, n, true_min_estimate; filename=plot_filename_semilog_bundles, offset_iterations=false)
-
-        # Create wall-clock time vs objective gap plot for bundles only
-        plot_filename_wallclock_bundles = joinpath(results_folder, "wallclock_gap_bundles_spd_$(n)x$(n).png")
-        time_records_bundles_only = [
-            rpb_time_record,
-            rpb_fo_time_record,
-            rcbm_time_record,
-            pba_time_record,
-        ]
-        plot_objective_gap_convergence(time_records_bundles_only, method_names_bundles_only, n, true_min_estimate; filename=plot_filename_wallclock_bundles, wallclock=true, wallclock_times=[rpb_total_time, rpb_fo_total_time, time() - rcbm_start_time, time() - pba_start_time])  
+            # Wall-clock time
+            plot_objective_gap_convergence(trec, names, n, true_min_estimate;
+                filename=joinpath(results_folder, "wallclock_gap$(subset_name)_spd_$(n)x$(n).pdf"),
+                wallclock=true, ylims_lower=atol)
+            plot_objective_gap_convergence(trec, names, n, true_min_estimate;
+                filename=joinpath(results_folder, "wallclock_gap$(subset_name)_short_spd_$(n)x$(n).pdf"),
+                wallclock=true, ylims_lower=atol, max_x=time_cut)
+        end
 
     else
         # Original single-phase approach
-        println("Running RBCM, PBM, RPB, and SGM on SPD dimension $n ...")
-        println("RBCM")
+        println("Running all methods on SPD dimension $n ...")
+
+        # --- Exponential retraction methods ---
+        println("RCBM")
         rcbm = convex_bundle_method(M, f_spd, ∂f_spd, p0; rcbm_kwargs(diameter_spd, domf_spd, k_max_spd, k_min_spd)...)
         rcbm_result = get_solver_result(rcbm)
         rcbm_record_raw = get_record(rcbm)
         rcbm_record = vcat([initial_entry], rcbm_record_raw)
 
-        println("Proximal Bundle Method")
+        println("PBA")
         pba = proximal_bundle_method(M, f_spd, ∂f_spd, p0; pba_kwargs...)
         pba_result = get_solver_result(pba)
         pba_record_raw = get_record(pba)
         pba_record = vcat([initial_entry], pba_record_raw)
 
-        println("Riemannian Proximal Bundle (RPB - Exponential)")
-        # Create RPB solver instance
+        println("RPB (Exponential)")
         initial_obj = f_spd(M, p0)
         initial_subgrad = ∂f_spd(M, p0)
 
@@ -774,18 +915,20 @@ for n in spd_dims
             proximal_parameter=1.0, trust_parameter=0.1,
             adaptive_proximal=true, know_minimizer=false, relative_error=false
         )
-
-        # Run RPB solver
         run!(rpb_solver)
 
-        # Convert RPB results to match expected format (iteration, objective) pairs
-        # Use raw_objective_history instead of objective_history (which contains gaps)
         rpb_iterations = collect(0:length(rpb_solver.raw_objective_history)-1)
         rpb_objectives = rpb_solver.raw_objective_history
         rpb_record = [(iter, obj) for (iter, obj) in zip(rpb_iterations, rpb_objectives)]
 
-        println("Riemannian Proximal Bundle (RPB - First-Order + Projection)")
-        # Create RPB solver instance with first-order retraction and projection transport
+        println("SGM")
+        sgm = subgradient_method(M, f_spd, ∂f_spd, p0; sgm_kwargs...)
+        sgm_result = get_solver_result(sgm)
+        sgm_record_raw = get_record(sgm)
+        sgm_record = vcat([initial_entry], sgm_record_raw)
+
+        # --- First-order retraction methods ---
+        println("RPB (First-Order + Projection)")
         rpb_fo_solver = RProximalBundle(
             M, retraction_first_order, transport_projection,
             (x) -> f_spd(M, x), (x) -> ∂f_spd(M, x),
@@ -795,37 +938,82 @@ for n in spd_dims
             proximal_parameter=1.0, trust_parameter=0.1,
             adaptive_proximal=true, know_minimizer=false, relative_error=false
         )
-
-        # Run RPB first-order solver
         run!(rpb_fo_solver)
 
-        # Convert RPB first-order results to match expected format
         rpb_fo_iterations = collect(0:length(rpb_fo_solver.raw_objective_history)-1)
         rpb_fo_objectives = rpb_fo_solver.raw_objective_history
         rpb_fo_record = [(iter, obj) for (iter, obj) in zip(rpb_fo_iterations, rpb_fo_objectives)]
 
-        println("Subgradient Method")
-        sgm = subgradient_method(M, f_spd, ∂f_spd, p0; sgm_kwargs...)
-        sgm_result = get_solver_result(sgm)
-        sgm_record_raw = get_record(sgm)
-        sgm_record = vcat([initial_entry], sgm_record_raw)
+        println("RCBM-FO")
+        rcbm_fo = convex_bundle_method(M, f_spd, ∂f_spd, p0; rcbm_kwargs(diameter_spd, domf_spd, k_max_spd, k_min_spd)...,
+            retraction_method=FirstOrderSPDRetraction(), vector_transport_method=ProjectionTransport())
+        rcbm_fo_result = get_solver_result(rcbm_fo)
+        rcbm_fo_record_raw = get_record(rcbm_fo)
+        rcbm_fo_record = vcat([initial_entry], rcbm_fo_record_raw)
+
+        println("PBA-FO")
+        pba_fo = proximal_bundle_method(M, f_spd, ∂f_spd, p0; pba_kwargs...,
+            retraction_method=FirstOrderSPDRetraction(), vector_transport_method=ProjectionTransport())
+        pba_fo_result = get_solver_result(pba_fo)
+        pba_fo_record_raw = get_record(pba_fo)
+        pba_fo_record = vcat([initial_entry], pba_fo_record_raw)
+
+        println("SGM-FO")
+        sgm_fo = subgradient_method(M, f_spd, ∂f_spd, p0; sgm_kwargs...,
+            retraction_method=FirstOrderSPDRetraction())
+        sgm_fo_result = get_solver_result(sgm_fo)
+        sgm_fo_record_raw = get_record(sgm_fo)
+        sgm_fo_record = vcat([initial_entry], sgm_fo_record_raw)
+
         println("Completed SPD dimension $n")
 
-        records = [
-            rpb_record,
-            rpb_fo_record,
-            rcbm_record,
-            pba_record,
-            sgm_record,
+        records_all = [
+            rpb_record, rpb_fo_record,
+            rcbm_record, rcbm_fo_record,
+            pba_record, pba_fo_record,
+            sgm_record, sgm_fo_record,
+        ]
+        method_names_all = [
+            L"\textrm{RPB (Ours)}", L"\textrm{RPB-FO (Ours)}",
+            L"\textrm{RCBM}", L"\textrm{RCBM-FO}",
+            L"\textrm{PBA}", L"\textrm{PBA-FO}",
+            L"\textrm{SGM}", L"\textrm{SGM-FO}",
         ]
 
-        # Create semi-log convergence plot
-        method_names = ["RPB (Ours)", "RPB-FO (Ours)", "RCBM", "PBA", "SGM"]
-        plot_filename = joinpath(results_folder, "convergence_semilog_spd_$(n)x$(n).png")
-        # For single-phase mode, estimate true minimum from all final objective values
-        all_final_objectives = [minimum([r[2] for r in record]) for record in records]
+        # Estimate true minimum from all final objective values
+        all_final_objectives = [minimum([r[2] for r in record]) for record in records_all]
         true_min_estimate_single = minimum(all_final_objectives)
-        plot_objective_gap_convergence(records, method_names, n, true_min_estimate_single; filename=plot_filename, offset_iterations=false)
+
+        # No-PBA subset
+        nopba_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "PBA")]
+        records_nopba = records_all[nopba_indices]
+        method_names_nopba = method_names_all[nopba_indices]
+
+        # Bundles-only subset (exclude SGM and SGM-FO)
+        bundles_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "SGM")]
+        records_bundles = records_all[bundles_indices]
+        method_names_bundles = method_names_all[bundles_indices]
+
+        # Compute 5× shortest method cutoffs (iteration-based only in single-phase)
+        shortest_iter_all = minimum(length(r) for r in records_all)
+        iter_cutoff_all = 5 * shortest_iter_all
+        shortest_iter_nopba = minimum(length(r) for r in records_nopba)
+        iter_cutoff_nopba = 5 * shortest_iter_nopba
+        shortest_iter_bundles = minimum(length(r) for r in records_bundles)
+        iter_cutoff_bundles = 5 * shortest_iter_bundles
+
+        for (subset_name, rec, names, iter_cut) in [
+            ("", records_all, method_names_all, iter_cutoff_all),
+            ("_nopba", records_nopba, method_names_nopba, iter_cutoff_nopba),
+            ("_bundles", records_bundles, method_names_bundles, iter_cutoff_bundles),
+        ]
+            plot_objective_gap_convergence(rec, names, n, true_min_estimate_single;
+                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_spd_$(n)x$(n).pdf"),
+                offset_iterations=false, ylims_lower=atol)
+            plot_objective_gap_convergence(rec, names, n, true_min_estimate_single;
+                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_short_spd_$(n)x$(n).pdf"),
+                offset_iterations=false, ylims_lower=atol, max_x=iter_cut)
+        end
     end
 
     if benchmarking
@@ -875,7 +1063,7 @@ for n in spd_dims
 
         B1_SPD, B2_SPD = export_dataframes(
             M,
-            records,
+            records_all,
             times,
             results_folder,
             experiment_name,

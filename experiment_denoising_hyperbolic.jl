@@ -1,7 +1,7 @@
 using PrettyTables
 using BenchmarkTools
 using CSV, DataFrames
-using ColorSchemes, Plots
+using ColorSchemes, Plots, Plots.PlotMeasures, LaTeXStrings
 using QuadraticModels, RipQP
 using Random, LinearAlgebra, LRUCache
 using Statistics
@@ -10,6 +10,8 @@ using ManifoldDiff, Manifolds, Manopt, ManoptExamples, ManifoldsBase
 
 include("src/RiemannianProximalBundle.jl")
 using .Main: RProximalBundle, run!, plot_objective_versus_iter
+
+pgfplotsx()
 
 # Add inner product function for the RPB solver
 inner_product(M, p, v, w) = inner(M, p, v, w)
@@ -52,7 +54,7 @@ alpha = 0.5 # regularization parameter
 atol = 1e-8
 k_max = 0.0 # maximum sectional curvature
 k_min = -1.0 # minimum sectional curvature
-max_iter = 10_000 # maximum iterations
+max_iter = 100_000 # maximum iterations
 extended_max_iter = 1_000_000 # extended maximum iterations for sgm and rbm to find true minimum
 back_tracking_fact = 2 # backtracking factor
 
@@ -209,144 +211,373 @@ proxes = (
 )
 
 # ============================================================================
-# RipQP Logging - Using Manopt's sub_problem callback mechanism
+# QP Solver Diagnostics - Override Manopt's RipQP extension to intercept
+# every QP solve during RCBM and PBA runs.
 # ============================================================================
-# using Printf: @printf
+import Manopt: convex_bundle_method_subsolver!, proximal_bundle_method_subsolver!
+using SparseArrays: sparse
+using LinearAlgebra: tril, cond
 
-# # Global storage for RipQP statistics
-# mutable struct RipQPStats
-#     call_count::Int
-#     print_frequency::Int
-#     status_history::Vector{Symbol}
-#     iter_history::Vector{Int}
-#     primal_feas_history::Vector{Float64}
-#     dual_feas_history::Vector{Float64}
-#     elapsed_time_history::Vector{Float64}
-# end
+mutable struct QPDiagnostics
+    call_count::Int
+    method_label::String          # "RCBM" or "PBA" -- set before each run
+    print_frequency::Int
+    # Per-call logs
+    status_history::Vector{Symbol}
+    iter_history::Vector{Int}
+    primal_feas_history::Vector{Float64}
+    dual_feas_history::Vector{Float64}
+    objective_history::Vector{Float64}
+    elapsed_time_history::Vector{Float64}
+    # Problem diagnostics
+    bundle_size_history::Vector{Int}
+    H_cond_history::Vector{Float64}
+    # Solution diagnostics
+    has_nan_history::Vector{Bool}
+    has_inf_history::Vector{Bool}
+    lambda_min_history::Vector{Float64}
+    lambda_max_history::Vector{Float64}
+    simplex_violation_history::Vector{Float64}   # |sum(λ) - 1|
+    neg_lambda_count_history::Vector{Int}        # number of λ_i < -eps
+    # Pruning diagnostics: track weight of newest element (last index)
+    newest_lambda_history::Vector{Float64}       # λ[end] -- weight QP assigns to newest bundle element
+    newest_would_be_pruned_history::Vector{Bool}  # whether λ[end] ≤ eps() (i.e., will be pruned)
+end
 
-# const RIPQP_STATS = RipQPStats(0, 100, Symbol[], Int[], Float64[], Float64[], Float64[])
+function QPDiagnostics(; print_frequency::Int=100)
+    QPDiagnostics(0, "QP", print_frequency,
+        Symbol[], Int[], Float64[], Float64[], Float64[], Float64[],
+        Int[], Float64[],
+        Bool[], Bool[], Float64[], Float64[], Float64[], Int[],
+        Float64[], Bool[])
+end
 
-# function reset_ripqp_stats!(; frequency::Int=100)
-#     RIPQP_STATS.call_count = 0
-#     RIPQP_STATS.print_frequency = frequency
-#     empty!(RIPQP_STATS.status_history)
-#     empty!(RIPQP_STATS.iter_history)
-#     empty!(RIPQP_STATS.primal_feas_history)
-#     empty!(RIPQP_STATS.dual_feas_history)
-#     empty!(RIPQP_STATS.elapsed_time_history)
-# end
+function reset_qp_diagnostics!(d::QPDiagnostics; label::String="QP", print_frequency::Int=d.print_frequency)
+    d.call_count = 0
+    d.method_label = label
+    d.print_frequency = print_frequency
+    for fn in fieldnames(QPDiagnostics)
+        v = getfield(d, fn)
+        v isa AbstractVector && empty!(v)
+    end
+end
 
-# """
-#     LoggingRipQP
+const QP_DIAG = QPDiagnostics(print_frequency=100)
 
-# A callable struct that wraps RipQP and logs solver statistics.
-# Pass this as a sub_problem to Manopt's bundle methods.
-# """
-# struct LoggingRipQP end
+function log_qp_solve!(d::QPDiagnostics, stats, λ, H, bundle_size::Int)
+    d.call_count += 1
 
-# function (::LoggingRipQP)(qp; kwargs...)
-#     # Call the actual RipQP solver
-#     stats = RipQP.ripqp(qp; kwargs...)
+    # --- Solver output ---
+    push!(d.status_history, stats.status)
+    push!(d.iter_history, stats.iter)
+    push!(d.primal_feas_history, Float64(stats.primal_feas))
+    push!(d.dual_feas_history, Float64(stats.dual_feas))
+    push!(d.objective_history, Float64(stats.objective))
+    push!(d.elapsed_time_history, stats.elapsed_time)
 
-#     # Log the results
-#     RIPQP_STATS.call_count += 1
-#     push!(RIPQP_STATS.status_history, stats.status)
-#     push!(RIPQP_STATS.iter_history, stats.iter)
-#     push!(RIPQP_STATS.primal_feas_history, Float64(stats.primal_feas))
-#     push!(RIPQP_STATS.dual_feas_history, Float64(stats.dual_feas))
-#     push!(RIPQP_STATS.elapsed_time_history, stats.elapsed_time)
+    # --- Problem conditioning ---
+    push!(d.bundle_size_history, bundle_size)
+    H_cond = try Float64(cond(H)) catch; NaN end
+    push!(d.H_cond_history, H_cond)
 
-#     # Print at specified frequency
-#     if RIPQP_STATS.call_count % RIPQP_STATS.print_frequency == 0
-#         println("  [RipQP #$(RIPQP_STATS.call_count)] " *
-#                 "status=$(stats.status), iter=$(stats.iter), " *
-#                 "primal_feas=$(round(stats.primal_feas, sigdigits=2)), " *
-#                 "dual_feas=$(round(stats.dual_feas, sigdigits=2))")
-#     end
+    # --- Solution health ---
+    push!(d.has_nan_history, any(isnan, λ))
+    push!(d.has_inf_history, any(isinf, λ))
+    push!(d.lambda_min_history, minimum(λ))
+    push!(d.lambda_max_history, maximum(λ))
+    push!(d.simplex_violation_history, abs(sum(λ) - 1.0))
+    push!(d.neg_lambda_count_history, count(x -> x < -1e-12, λ))
 
-#     return stats
-# end
+    # --- Pruning diagnostics: newest element is at index end ---
+    # The last element in the bundle was added most recently (previous iteration).
+    # If QP assigns it near-zero weight, it will be pruned by the λ ≤ atol_λ rule,
+    # meaning the newest information is being discarded.
+    newest_λ = λ[end]
+    would_be_pruned = newest_λ ≤ eps()
+    push!(d.newest_lambda_history, newest_λ)
+    push!(d.newest_would_be_pruned_history, would_be_pruned)
 
-# # Create singleton instance
-# const LOGGING_RIPQP = LoggingRipQP()
+    # --- Immediate warnings for critical issues ---
+    is_critical = false
+    if stats.status == :infeasible
+        @warn "[$(d.method_label) QP #$(d.call_count)] INFEASIBLE -- QP declared infeasible by RipQP"
+        is_critical = true
+    end
+    if stats.status == :unbounded
+        @warn "[$(d.method_label) QP #$(d.call_count)] UNBOUNDED -- QP declared unbounded by RipQP"
+        is_critical = true
+    end
+    if any(isnan, λ)
+        @warn "[$(d.method_label) QP #$(d.call_count)] NaN in solution vector! λ = $λ"
+        is_critical = true
+    end
+    if any(isinf, λ)
+        @warn "[$(d.method_label) QP #$(d.call_count)] Inf in solution vector! λ = $λ"
+        is_critical = true
+    end
+    if stats.status ∉ (:first_order, :acceptable) && !is_critical
+        @warn "[$(d.method_label) QP #$(d.call_count)] Non-optimal: status=$(stats.status), iter=$(stats.iter), pfeas=$(stats.primal_feas), dfeas=$(stats.dual_feas)"
+    end
 
-# """
-#     DebugRipQPStatus <: DebugAction
+    # --- Per-iteration bundle size and newest element weight (throttled) ---
+    if d.call_count % d.print_frequency == 0 || d.call_count == 1
+        pruned_marker = would_be_pruned ? " ⚠ NEWEST PRUNED" : ""
+        println("  [$(d.method_label) iter $(d.call_count)] bundle_size=$bundle_size, λ[end]=$(round(newest_λ, sigdigits=4))$pruned_marker")
+    end
+end
 
-# Debug action that prints the most recent RipQP solver status.
-# """
-# mutable struct DebugRipQPStatus <: DebugAction
-#     print_frequency::Int
-#     io::IO
+function print_qp_diagnostics_summary(d::QPDiagnostics)
+    println("\n" * "="^70)
+    println("  QP SOLVER DIAGNOSTICS SUMMARY -- $(d.method_label)")
+    println("="^70)
+    println("Total QP solves: $(d.call_count)")
 
-#     DebugRipQPStatus(; frequency::Int=1, io::IO=stdout) = new(frequency, io)
-# end
+    isempty(d.status_history) && (println("  No QP calls were logged."); println("="^70 * "\n"); return)
 
-# function (d::DebugRipQPStatus)(::AbstractManoptProblem, st::AbstractManoptSolverState, i::Int)
-#     (i % d.print_frequency != 0) && return nothing
+    # --- Status breakdown ---
+    status_counts = Dict{Symbol, Int}()
+    for s in d.status_history
+        status_counts[s] = get(status_counts, s, 0) + 1
+    end
+    println("\nStatus breakdown:")
+    for (status, cnt) in sort(collect(status_counts), by=x->-x[2])
+        pct = round(100 * cnt / length(d.status_history), digits=1)
+        marker = status ∈ (:first_order, :acceptable) ? "  " : "!!"
+        println("  $marker $status: $cnt ($pct%)")
+    end
 
-#     if !isempty(RIPQP_STATS.status_history)
-#         status = RIPQP_STATS.status_history[end]
-#         iters = RIPQP_STATS.iter_history[end]
-#         pf = RIPQP_STATS.primal_feas_history[end]
-#         df = RIPQP_STATS.dual_feas_history[end]
+    # --- Feasibility ---
+    pf = d.primal_feas_history
+    df = d.dual_feas_history
+    println("\nFeasibility (primal): max=$(round(maximum(pf), sigdigits=3)), " *
+            "mean=$(round(mean(pf), sigdigits=3)), median=$(round(median(pf), sigdigits=3))")
+    println("Feasibility (dual):   max=$(round(maximum(df), sigdigits=3)), " *
+            "mean=$(round(mean(df), sigdigits=3)), median=$(round(median(df), sigdigits=3))")
 
-#         print(d.io, "RipQP[status=$status, iter=$iters, ")
-#         print(d.io, "pf=$(round(pf, sigdigits=2)), ")
-#         print(d.io, "df=$(round(df, sigdigits=2))] ")
-#     else
-#         print(d.io, "RipQP[no calls yet] ")
-#     end
+    # --- Problem conditioning ---
+    valid_conds = filter(!isnan, d.H_cond_history)
+    if !isempty(valid_conds)
+        println("\nGram matrix condition number: max=$(round(maximum(valid_conds), sigdigits=3)), " *
+                "mean=$(round(mean(valid_conds), sigdigits=3)), median=$(round(median(valid_conds), sigdigits=3))")
+        ill_cond = count(c -> c > 1e10, valid_conds)
+        # ill_cond > 0 && println("  WARNING: $ill_cond / $(length(valid_conds)) QP solves had cond(H) > 1e10")
+    end
 
-#     return nothing
-# end
+    # --- Solution health ---
+    n_nan = count(d.has_nan_history)
+    n_inf = count(d.has_inf_history)
+    n_neg = count(x -> x > 0, d.neg_lambda_count_history)
+    max_simplex_viol = maximum(d.simplex_violation_history)
+    println("\nSolution health:")
+    println("  NaN in solution:     $n_nan / $(d.call_count)")
+    println("  Inf in solution:     $n_inf / $(d.call_count)")
+    println("  Negative lambda:     $n_neg / $(d.call_count) solves had lambda_i < -1e-12")
+    println("  Simplex violation:   max |sum(lambda)-1| = $(round(max_simplex_viol, sigdigits=3))")
+    println("  Lambda range:        [$(round(minimum(d.lambda_min_history), sigdigits=3)), $(round(maximum(d.lambda_max_history), sigdigits=3))]")
 
-# """
-#     print_ripqp_summary()
+    # --- Bundle sizes ---
+    println("\nBundle sizes: min=$(minimum(d.bundle_size_history)), " *
+            "max=$(maximum(d.bundle_size_history)), " *
+            "mean=$(round(mean(d.bundle_size_history), digits=1))")
+    println("Bundle size per iteration:")
+    println("  ", d.bundle_size_history)
 
-# Print a summary of all RipQP calls after the optimization completes.
-# """
-# function print_ripqp_summary()
-#     println("\n=== RipQP Solver Summary ===")
-#     println("Total QP solves: $(RIPQP_STATS.call_count)")
+    # --- Non-optimal detail ---
+    non_opt_indices = findall(s -> s ∉ (:first_order, :acceptable), d.status_history)
+    if !isempty(non_opt_indices)
+        println("\nNon-optimal QP solves ($(length(non_opt_indices)) total):")
+        show_n = min(20, length(non_opt_indices))
+        for i in non_opt_indices[1:show_n]
+            println("  QP #$i: status=$(d.status_history[i]), iter=$(d.iter_history[i]), " *
+                    "pfeas=$(round(d.primal_feas_history[i], sigdigits=3)), " *
+                    "dfeas=$(round(d.dual_feas_history[i], sigdigits=3)), " *
+                    "cond(H)=$(round(d.H_cond_history[i], sigdigits=3)), " *
+                    "bundle_size=$(d.bundle_size_history[i])")
+        end
+        length(non_opt_indices) > show_n && println("  ... and $(length(non_opt_indices) - show_n) more")
+    else
+        println("\nAll QP solves converged to first-order or acceptable optimality.")
+    end
 
-#     if !isempty(RIPQP_STATS.status_history)
-#         # Count status occurrences
-#         status_counts = Dict{Symbol, Int}()
-#         for s in RIPQP_STATS.status_history
-#             status_counts[s] = get(status_counts, s, 0) + 1
-#         end
-#         println("Status breakdown:")
-#         for (status, count) in sort(collect(status_counts), by=x->x[2], rev=true)
-#             pct = round(100 * count / length(RIPQP_STATS.status_history), digits=1)
-#             println("  $status: $count ($pct%)")
-#         end
+    # --- Pruning diagnostics: newest element survival ---
+    if !isempty(d.newest_would_be_pruned_history)
+        n_pruned = count(d.newest_would_be_pruned_history)
+        n_total = length(d.newest_would_be_pruned_history)
+        pct_pruned = round(100 * n_pruned / n_total, digits=1)
+        println("\nNewest element pruning (λ[end] ≤ eps → pruned next iter):")
+        println("  Pruned: $n_pruned / $n_total ($pct_pruned%)")
+        if !isempty(d.newest_lambda_history)
+            println("  λ[end] range: [$(round(minimum(d.newest_lambda_history), sigdigits=3)), $(round(maximum(d.newest_lambda_history), sigdigits=3))]")
+            println("  λ[end] mean:  $(round(mean(d.newest_lambda_history), sigdigits=3))")
+            println("  λ[end] median: $(round(median(d.newest_lambda_history), sigdigits=3))")
+        end
+        if n_pruned > 0
+            # Show first few iterations where newest was pruned
+            pruned_iters = findall(d.newest_would_be_pruned_history)
+            show_n = min(20, length(pruned_iters))
+            println("  First pruned at iterations: $(pruned_iters[1:show_n])" *
+                    (length(pruned_iters) > show_n ? " ... and $(length(pruned_iters) - show_n) more" : ""))
+            # Check for consecutive pruning (persistent stalling pattern)
+            max_consecutive = 0
+            current_consecutive = 0
+            for pruned in d.newest_would_be_pruned_history
+                if pruned
+                    current_consecutive += 1
+                    max_consecutive = max(max_consecutive, current_consecutive)
+                else
+                    current_consecutive = 0
+                end
+            end
+            println("  Max consecutive prunings: $max_consecutive")
+            if pct_pruned > 50
+                println("  ⚠ WARNING: Newest subgradient is pruned >50% of the time!")
+                println("    This means RCBM is discarding new information and may explain stalling.")
+            end
+        end
+    end
 
-#         # Feasibility stats
-#         pf = RIPQP_STATS.primal_feas_history
-#         df = RIPQP_STATS.dual_feas_history
-#         println("Primal feasibility: max=$(round(maximum(pf), sigdigits=2)), mean=$(round(mean(pf), sigdigits=2))")
-#         println("Dual feasibility: max=$(round(maximum(df), sigdigits=2)), mean=$(round(mean(df), sigdigits=2))")
+    # --- Infeasible / unbounded specifically ---
+    n_infeasible = count(s -> s == :infeasible, d.status_history)
+    n_unbounded = count(s -> s == :unbounded, d.status_history)
+    n_stalled = count(s -> s == :stalled, d.status_history)
+    n_max_iter = count(s -> s == :max_iter, d.status_history)
+    if n_infeasible + n_unbounded + n_stalled + n_max_iter > 0
+        println("\nCritical status counts:")
+        n_infeasible > 0 && println("  INFEASIBLE: $n_infeasible")
+        n_unbounded > 0  && println("  UNBOUNDED:  $n_unbounded")
+        n_stalled > 0    && println("  STALLED:    $n_stalled")
+        n_max_iter > 0   && println("  MAX_ITER:   $n_max_iter")
+    end
 
-#         # Check for any non-optimal solves
-#         non_optimal = filter(s -> s != :first_order, RIPQP_STATS.status_history)
-#         if !isempty(non_optimal)
-#             println("⚠️  $(length(non_optimal)) non-optimal QP solves detected!")
-#             non_opt_indices = findall(s -> s != :first_order, RIPQP_STATS.status_history)
-#             if length(non_opt_indices) <= 10
-#                 println("  At QP calls: $non_opt_indices")
-#             else
-#                 println("  First 10 at QP calls: $(non_opt_indices[1:10])...")
-#             end
-#         else
-#             println("✓ All QP solves converged to first-order optimality")
-#         end
-#     else
-#         println("No RipQP calls were logged.")
-#         println("Note: The sub_problem kwarg must be set to use LoggingRipQP.")
-#     end
-#     println("============================\n")
-# end
+    println("="^70 * "\n")
+end
+
+# ============================================================================
+# Tangent Space Violation Diagnostics - Track whether transported subgradients
+# (pre-QP) and the aggregate direction (post-QP) lie in the tangent space.
+# ============================================================================
+mutable struct TangentSpaceDiagnostics
+    method_label::String
+    print_frequency::Int
+    call_count::Int
+    # Pre-QP: max tangent space violation across input subgradients per call
+    pre_qp_max_violation_history::Vector{Float64}
+    pre_qp_mean_violation_history::Vector{Float64}
+    # Post-QP: tangent space violation of the aggregate direction
+    post_qp_violation_history::Vector{Float64}
+end
+
+function TangentSpaceDiagnostics(; print_frequency::Int=100)
+    TangentSpaceDiagnostics("TS", print_frequency, 0, Float64[], Float64[], Float64[])
+end
+
+function reset_ts_diagnostics!(d::TangentSpaceDiagnostics; label::String="TS", print_frequency::Int=d.print_frequency)
+    d.method_label = label
+    d.print_frequency = print_frequency
+    d.call_count = 0
+    empty!(d.pre_qp_max_violation_history)
+    empty!(d.pre_qp_mean_violation_history)
+    empty!(d.post_qp_violation_history)
+end
+
+"""
+    tangent_violation(M, p, X)
+
+Compute how far X is from lying in T_p M, measured as ‖X - project(M, p, X)‖_p.
+"""
+function tangent_violation(M, p, X)
+    X_proj = project(M, p, X)
+    return norm(M, p, X .- X_proj)
+end
+
+function log_ts_check!(d::TangentSpaceDiagnostics, M, p, transported_subgradients, λ;
+                       scale_factor::Float64=1.0)
+    d.call_count += 1
+
+    # --- Pre-QP: check each transported subgradient ---
+    violations = [tangent_violation(M, p, X) for X in transported_subgradients]
+    max_viol = maximum(violations)
+    mean_viol = mean(violations)
+    push!(d.pre_qp_max_violation_history, max_viol)
+    push!(d.pre_qp_mean_violation_history, mean_viol)
+
+    # --- Post-QP: check aggregate direction ---
+    aggregate = scale_factor .* sum(λ[j] .* transported_subgradients[j] for j in eachindex(λ))
+    post_viol = tangent_violation(M, p, aggregate)
+    push!(d.post_qp_violation_history, post_viol)
+
+    # --- Immediate warnings for large violations ---
+    if max_viol > 1e-8
+        @warn "[$(d.method_label) TS #$(d.call_count)] Pre-QP tangent violation: max=$(max_viol), mean=$(mean_viol)"
+    end
+    if post_viol > 1e-8
+        @warn "[$(d.method_label) TS #$(d.call_count)] Post-QP aggregate tangent violation: $(post_viol)"
+    end
+end
+
+function print_ts_diagnostics_summary(d::TangentSpaceDiagnostics)
+    println("\n" * "="^70)
+    println("  TANGENT SPACE DIAGNOSTICS SUMMARY -- $(d.method_label)")
+    println("="^70)
+    println("Total QP calls checked: $(d.call_count)")
+
+    isempty(d.pre_qp_max_violation_history) && (println("  No calls were logged."); println("="^70 * "\n"); return)
+
+    # --- Pre-QP summary ---
+    pre_max = d.pre_qp_max_violation_history
+    pre_mean = d.pre_qp_mean_violation_history
+    println("\nPre-QP (transported subgradients entering QP):")
+    println("  Max violation per call:  max=$(round(maximum(pre_max), sigdigits=3)), " *
+            "mean=$(round(mean(pre_max), sigdigits=3)), median=$(round(median(pre_max), sigdigits=3))")
+    println("  Mean violation per call: max=$(round(maximum(pre_mean), sigdigits=3)), " *
+            "mean=$(round(mean(pre_mean), sigdigits=3)), median=$(round(median(pre_mean), sigdigits=3))")
+    n_pre_bad = count(v -> v > 1e-12, pre_max)
+    println("  Calls with max violation > 1e-12: $n_pre_bad / $(d.call_count)")
+
+    # --- Post-QP summary ---
+    post = d.post_qp_violation_history
+    println("\nPost-QP (aggregate direction after QP weighting):")
+    println("  Violation: max=$(round(maximum(post), sigdigits=3)), " *
+            "mean=$(round(mean(post), sigdigits=3)), median=$(round(median(post), sigdigits=3))")
+    n_post_bad = count(v -> v > 1e-12, post)
+    println("  Calls with violation > 1e-12: $n_post_bad / $(d.call_count)")
+
+    println("="^70 * "\n")
+end
+
+const TS_DIAG = TangentSpaceDiagnostics(print_frequency=100)
+
+# --- Override Manopt's RCBM subsolver to intercept RipQP ---
+function convex_bundle_method_subsolver!(
+        M::A, λ, p_last_serious, linearization_errors, transported_subgradients
+    ) where {A <: AbstractManifold}
+    d = length(linearization_errors)
+    H = [inner(M, p_last_serious, X, Y) for X in transported_subgradients, Y in transported_subgradients]
+    qm = QuadraticModel(linearization_errors, sparse(tril(H));
+        A = reshape(ones(d), 1, d),
+        lcon = [one(eltype(linearization_errors))], ucon = [one(eltype(linearization_errors))],
+        lvar = zeros(d), uvar = [Inf for i in 1:d], c0 = zero(eltype(linearization_errors)))
+
+    stats = RipQP.ripqp(qm; display = false)
+    λ .= stats.solution
+    return λ
+end
+
+# --- Override Manopt's PBA subsolver to intercept RipQP ---
+function proximal_bundle_method_subsolver!(
+        M::A, λ, p_last_serious, μ, approximation_errors, transported_subgradients
+    ) where {A <: AbstractManifold}
+    d = length(approximation_errors)
+    H = 1 / μ * [inner(M, p_last_serious, X, Y) for X in transported_subgradients, Y in transported_subgradients]
+    qm = QuadraticModel(approximation_errors, sparse(tril(H));
+        A = reshape(ones(d), 1, d),
+        lcon = [one(eltype(approximation_errors))], ucon = [one(eltype(approximation_errors))],
+        lvar = zeros(d), uvar = [Inf for i in 1:d], c0 = zero(eltype(approximation_errors)))
+
+    stats = RipQP.ripqp(qm; display = false)
+    λ .= stats.solution
+    return λ
+end
 
 """
     inspect_pba_state(st)
@@ -402,7 +633,6 @@ end
     - `show_reference`: Boolean flag to show/hide the O(1/√k) reference line (default: true, disabled for wall clock plots)
 """
 function plot_objective_gap_convergence(records, method_names, true_min_estimate;
-                                   title=nothing,
                                    xlabel=nothing,
                                    ylabel=nothing,
                                    filename=nothing,
@@ -413,19 +643,16 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                                    manifold_tolerance=1e-12,
                                    show_reference=true,
                                    wallclock = false,
-                                   wallclock_times = nothing, 
-                                   ylims = (0.00001, Inf)
+                                   wallclock_times = nothing,
+                                   ylims = (0.00001, Inf),
+                                   max_x = nothing
                                    )
     # Set default titles and labels based on plot_current flag
-    if title === nothing
-        title = plot_current ? "Hyperbolic Signal Denoising" :
-                              "Hyperbolic Signal Denoising"
-    end
     if ylabel === nothing
-        ylabel = plot_current ? "Current Objective Gap" : "Minimum Objective Gap"
+        ylabel = plot_current ? L"\textrm{Current Objective Gap}" : L"\textrm{Minimum Objective Gap}"
     end
     if xlabel === nothing
-        xlabel = wallclock ? "Time (seconds)" : "Oracle Calls"
+        xlabel = wallclock ? L"\textrm{Time (seconds)}" : L"\textrm{Oracle Calls}"
     end
 
     # 1. Initialize the Plot
@@ -434,13 +661,15 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
     p = plot(
         xlabel=xlabel,
         ylabel=ylabel,
-        title=title,
         yscale=:log10,
         xscale=xscale_log ? :log10 : :identity,
         ylims=ylims,
         legend=:topright,
-        legendfontsize=8,
-        legendtitlefontsize=8,
+        size=(600, 400),
+        guidefontsize=12,
+        tickfontsize=10,
+        legendfontsize=10,
+        legendtitlefontsize=10,
         background_color_legend=:transparent,
         foreground_color_legend=:transparent,
         grid=true,
@@ -448,17 +677,18 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
         gridwidth=0.5,
         gridalpha=0.3,
         linewidth=1,
-        dpi=300,
+        margin=5mm,
+        extra_kwargs=Dict(:subplot => Dict("width" => raw"12cm", "height" => raw"8cm")),
     )
 
     # 2. Define a color palette (IBM/High-Contrast style for accessibility)
     # Map algorithm names to specific colors
     color_map = Dict(
-        "RPB" => "#785ef0",        # Purple
-        "RPB (Ours)" => "#785ef0",  # Purple
-        "PBA" => "#dc267f",        # Pink/Magenta
-        "RCBM" => "#fe6100",       # Orange
-        "SGM" => "#ffb000",        # Gold/Yellow
+        L"\textrm{RPB}" => "#785ef0",              # Purple
+        L"\textrm{RPB (Ours)}" => "#785ef0",        # Purple
+        L"\textrm{PBA}" => "#dc267f",              # Pink/Magenta
+        L"\textrm{RCBM}" => "#fe6100",             # Orange
+        L"\textrm{SGM}" => "#ffb000",              # Gold/Yellow
     )
     # Fallback colors if algorithm not found in map
     fallback_colors = ["#785ef0", "#dc267f", "#fe6100", "#ffb000", :brown]
@@ -534,7 +764,7 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                         base_H = manifold.manifold
                         n_comp = length(iterate)
 
-                        # Check manifold membership constraint
+                        # Check manifold membership constraint (iterate must be on manifold)
                         if manifold_violation_index === nothing
                             manifold_violation_found = false
                             for k in 1:n_comp
@@ -550,8 +780,14 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                             end
                         end
 
-                        # Check tangent space membership constraint separately
-                        if tangent_space_violation_index === nothing && search_direction !== nothing && length(search_direction) == n_comp
+                        # Check tangent space membership: search direction must be in T_{base_point}
+                        # For bundle methods (5th record = p_last_serious), skip this check:
+                        # Manopt records state AFTER step_solver!, so p_last_serious is post-update
+                        # while g/d was computed at the pre-update p_last_serious. This causes
+                        # false violations. QP-level diagnostics (TangentSpaceDiagnostics) check
+                        # at the correct moment instead.
+                        is_bundle_method = length(record[j]) >= 5
+                        if !is_bundle_method && tangent_space_violation_index === nothing && search_direction !== nothing && iterate !== nothing && length(search_direction) == n_comp
                             tangent_violation_found = false
                             for k in 1:n_comp
                                 p_k = get_component(manifold, iterate, k)
@@ -625,6 +861,14 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                 first_method_data = (valid_x_values, valid_gaps)
             end
 
+            # Downsample to at most 2000 points per line
+            n_pts = length(valid_x_values)
+            data_stride = n_pts > 2000 ? cld(n_pts, 2000) : 1
+            if data_stride > 1
+                valid_x_values = valid_x_values[1:data_stride:end]
+                valid_gaps = valid_gaps[1:data_stride:end]
+            end
+
             if !isempty(valid_x_values)
                 # Get color from map or use fallback
                 plot_color = get(color_map, name, fallback_colors[mod1(i, length(fallback_colors))])
@@ -641,7 +885,7 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                 else
                     # Violations detected - plot regular line until violation, then muted dotted line
                     # Find the violation point in the valid data
-                    violation_data_index = min(violation_index, length(valid_x_values))
+                    violation_data_index = min(cld(violation_index, data_stride), length(valid_x_values))
 
                     if violation_data_index > 1
                         # Plot regular line up to violation point
@@ -698,14 +942,20 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
 
         if !isempty(x_ref)
             plot!(p, x_ref, y_ref,
-                label="O(1/√k)",
+                label=L"O(1/\sqrt{k})",
                 color=:gray,
                 linestyle=:dot,
                 linewidth=1)
         end
     end
 
-    # 7. Save and Return
+    # 7. Apply x-axis limits if specified
+    if max_x !== nothing
+        current_xlims = Plots.xlims(p)
+        xlims!(p, (current_xlims[1], max_x))
+    end
+
+    # 8. Save and Return
     if filename !== nothing
         savefig(p, filename)
         println("Plot saved to: $filename")
@@ -721,21 +971,28 @@ noise = map(p -> exp(H, p, rand(H; vector_at=p, σ=sigma)), signal)
 diameter = 3 * maximum([distance(H, noise[i], noise[j]) for i in 1:length(noise), j in 1:length(noise)])
 Hn = PowerManifold(H, NestedPowerRepresentation(), length(noise))
 
-# --- polish exponential map with a projection to ensure numerical stability (optional) ---
-# 1. Define the method name
-struct ExpProjectionRetraction <: AbstractRetractionMethod end
+# --- polish parallel transport with a projection to ensure numerical stability ---
+# Defined on Hyperbolic (base manifold) so that PowerManifold's component-wise
+# dispatch calls this for each H^2 factor without ambiguity.
+struct ProjectedParallelTransport <: AbstractVectorTransportMethod end
 
-# 2. Define the behavior for the component manifold (Hyperbolic)
-# This will be applied to each H^2 inside (H^2)^n
-function ManifoldsBase.retract!(M::Hyperbolic, q, p, X, ::ExpProjectionRetraction)
-    # Step 1: Standard Exponential Map
+function ManifoldsBase.vector_transport_to!(M::Hyperbolic, Y, p, X, q, ::ProjectedParallelTransport)
+    parallel_transport_to!(M, Y, p, X, q)
+    project!(M, Y, q, Y)
+    return Y
+end
+
+# --- Polish the default ExponentialRetraction for Hyperbolic ---
+# Override retract! so that exp is always followed by a hyperboloid normalization.
+# This ensures ALL solvers (RCBM, PBA, SGM, RPB) get a polished retraction automatically,
+# including RCBM's internal DomainBackTrackingStepsize which ignores user-provided
+# retraction_method and uses default_retraction_method(M) = ExponentialRetraction().
+function ManifoldsBase.retract!(M::Hyperbolic, q, p, X, ::ExponentialRetraction)
     exp!(M, q, p, X)
-
-     # Use the built-in point projection
-    # Using 'project(M, q)' (2 args) avoids the ambiguity error
-    # then we copy the result back into the memory 'q'
-    copyto!(q, project(M, q))
-    
+    # Normalize back onto hyperboloid: enforce ⟨q, q⟩_M = -1
+    # where ⟨a,b⟩_M = -a[end]*b[end] + dot(a[1:end-1], b[1:end-1])
+    mq = dot(@view(q[1:end-1]), @view(q[1:end-1])) - q[end]^2  # ≈ -1
+    q ./= sqrt(-mq)
     return q
 end
 # --- Plot of ball
@@ -879,8 +1136,9 @@ initial_objective = f(Hn, noise)
 println("Initial objective value: $initial_objective")
 println()
 
-# Create initial entry for plotting
+# Create initial entries for plotting
 initial_entry = (0, initial_objective, noise)
+initial_entry_no_iterate = (0, initial_objective)
 
 # Set up manifold tools for RPB
 retraction_map = (p, v) -> retract(Hn, p, v, ExponentialRetraction())
@@ -919,10 +1177,23 @@ for (name, result) in zip(phase1_names, phase1_results)
     println("  $name: $result")
 end
 
+# Free Phase 1 solver state (true_min_estimate is already extracted)
+cppa_phase1 = nothing
+GC.gc()
 
 # --- PHASE 2: Run main experiments with RPB and other methods ---
 println("=== PHASE 2: Convergence comparison with objective gap ===")
 initial_subgradient = subgradient_of_f(Hn, noise)
+
+# Create data folder early so we can save results immediately after each run
+data_folder = joinpath(@__DIR__, "Denoising TV Hyperbolic Data")
+isdir(data_folder) || mkpath(data_folder)
+
+function save_record_csv(data_folder, experiment_name, method_name, record)
+    df = DataFrame(iteration = [r[1] for r in record], objective = [r[2] for r in record])
+    CSV.write(joinpath(data_folder, "$(experiment_name)_$(method_name)_objectives.csv"), df)
+    println("  Saved $(method_name) objectives to CSV")
+end
 
 # Configurations for Phase 2
 # Phase 2 stopping criterion: stop when objective gap is small enough
@@ -934,20 +1205,19 @@ rcbm_kwargs_phase2 = [
 :debug => [
     :Iteration,
     (:Cost, "F(p): %.10f "),
-    # DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
     :Stop,
-    100,
+    10_000,
     "\n",
 ],
 :diameter => diameter,
 :domain => domf,
 :k_max => k_max,
 :k_min => k_min,
-:record => [:Iteration, :Cost, :Iterate, :X],
+:record => [:Iteration, :Cost],
 :return_state => true,
 :stopping_criterion => gap_stopping_criterion | StopAfterIteration(max_iter),
-:vector_transport_method => ProjectionTransport(),
-:retraction_method => ExpProjectionRetraction(),
+:vector_transport_method => ProjectedParallelTransport(),
+# :atol_λ => 1e-12,  # Tighten inner QP solve for better convergence in Phase 2
 ]
 
 sgm_kwargs_phase2 = [
@@ -956,81 +1226,66 @@ sgm_kwargs_phase2 = [
 :return_state => true,
 :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
 :stopping_criterion => gap_stopping_criterion | StopAfterIteration(max_iter),
+# retraction_method not needed: ExponentialRetraction (default) is now polished with hyperboloid projection
 ]
 
 pba_kwargs_phase2 = [
+:bundle_size => 25,
 :cache => (:LRU, [:Cost, :SubGradient], 50),
 :debug => [
     :Iteration,
     (:Cost, "F(p): %.10f "),
     # DebugRipQPStatus(frequency=100),  # Print RipQP status every 100 iterations
     :Stop,
-    100,
+    10_000,
     "\n",
 ],
-:record => [:Iteration, :Cost, :Iterate, :X],
+:record => [:Iteration, :Cost],
 :return_state => true,
 :stopping_criterion => gap_stopping_criterion | StopAfterIteration(max_iter),
-:vector_transport_method => ProjectionTransport(),
-# :retraction_method => ExpProjectionRetraction(),
+:vector_transport_method => ProjectedParallelTransport(),
+# retraction_method not needed: ExponentialRetraction (default) is now polished with hyperboloid projection
 ]
 
-# Run Phase 2 experiments with detailed timing
+# Run Phase 2 experiments with detailed timing and QP diagnostics
 println("Running RCBM...")
-# reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
 rcbm_start_time = time()
 rcbm = convex_bundle_method(Hn, f, subgradient_of_f, noise; rcbm_kwargs_phase2...)
 rcbm_end_time = time()
-# print_ripqp_summary()  # Print RipQP summary for RCBM
-
-# print number of cuts in bundle enabled
-print("RCBM total time: $(rcbm_end_time - rcbm_start_time) seconds\n")
+rcbm_total_time = rcbm_end_time - rcbm_start_time
+print("RCBM total time: $rcbm_total_time seconds\n")
 rcbm_result = get_solver_result(rcbm)
 rcbm_record = get_record(rcbm)
-# Add initial entry to RCBM record to match RPB
-rcbm_record = [initial_entry; rcbm_record]
-
-# Create wall clock time record for RCBM with per-iteration average timing
-rcbm_total_time = rcbm_end_time - rcbm_start_time
-
-println("RCBM States Diagnostics: $(rcbm.state)")
+rcbm_record = [initial_entry_no_iterate; rcbm_record]
+save_record_csv(data_folder, experiment_name, "rcbm", rcbm_record)
+rcbm = nothing; rcbm_result = nothing; GC.gc()
 
 println("Running PBA...")
-# reset_ripqp_stats!(frequency=100)  # Reset RipQP stats
 pba_start_time = time()
 pba = proximal_bundle_method(Hn, f, subgradient_of_f, noise; pba_kwargs_phase2...)
 pba_end_time = time()
-# print_ripqp_summary()  # Print RipQP summary for PBA
-
-print("PBA total time: $(pba_end_time - pba_start_time) seconds\n")
+pba_total_time = pba_end_time - pba_start_time
+print("PBA total time: $pba_total_time seconds\n")
 pba_result = get_solver_result(pba)
 pba_record = get_record(pba)
-# Add initial entry to PBA record to match RPB
-pba_record = [initial_entry; pba_record]
-
-# Create wall clock time record for PBA with per-iteration average timing
-pba_total_time = pba_end_time - pba_start_time
-
-println("PBA States Diagnostics: $(pba.state)")
-
-# Inspect state structure to find RipQP solver location
-println("\n=== PBA State Structure Inspection ===")
-inspect_pba_state(pba.state; max_depth=4)
-println("=== End Inspection ===\n")
+pba_record = [initial_entry_no_iterate; pba_record]
+save_record_csv(data_folder, experiment_name, "pba", pba_record)
+pba = nothing; pba_result = nothing; GC.gc()
 
 println("Running SGM...")
 sgm_start_time = time()
 sgm = subgradient_method(Hn, f, subgradient_of_f, noise; sgm_kwargs_phase2...)
 sgm_end_time = time()
 
-print("SGM total time: $(sgm_end_time - sgm_start_time) seconds\n")
-sgm_result = get_solver_result(sgm)
-sgm_record = get_record(sgm)
-# Add initial entry to SGM record to match RPB
-sgm_record = [initial_entry; sgm_record]
-
-# Create wall clock time record for SGM with per-iteration average timing
 sgm_total_time = sgm_end_time - sgm_start_time
+print("SGM total time: $sgm_total_time seconds\n")
+sgm_result = get_solver_result(sgm)
+sgm_record_raw = get_record(sgm)
+# Strip iterates from SGM record to free memory (only iteration + objective needed)
+sgm_record = [(r[1], r[2]) for r in sgm_record_raw]
+sgm_record = [initial_entry_no_iterate; sgm_record]
+save_record_csv(data_folder, experiment_name, "sgm", sgm_record)
+sgm = nothing; sgm_result = nothing; sgm_record_raw = nothing; GC.gc()
 
 println("Running RPB...")
 rpb_start_time = time()
@@ -1075,6 +1330,8 @@ if !isempty(rpb_solver.objective_increase_flags)
         println("  Iterations with objective increases: $increase_iterations")
     end
 end
+save_record_csv(data_folder, experiment_name, "rpb", rpb_record)
+rpb_solver = nothing; rpb_result = nothing; GC.gc()
 
 # Print the wall-clock times for all methods
 println("\nWall-clock times for all methods:")
@@ -1083,307 +1340,315 @@ println("  RCBM total time: $rcbm_total_time seconds")
 println("  PBA total time: $pba_total_time seconds")
 println("  SGM total time: $sgm_total_time seconds")
 
-# --- Create Plots from Experiment ---
-# SGM vs Our Bundle Method Log-Log Plots (reference and no reference line), along with current objective vs minimum objective plots
-records = [rpb_record, sgm_record]
-method_names = ["RPB (Ours)", "SGM"]
-plot1 = plot_objective_gap_convergence(
-    records, method_names, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-loglog.png"),
-    xscale_log=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=true,
+# --- Save remaining experiment metadata (objective CSVs already saved after each run) ---
+metadata = DataFrame(
+    method = ["RPB", "RCBM", "PBA", "SGM"],
+    wallclock_seconds = [rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time],
 )
+CSV.write(joinpath(data_folder, "$(experiment_name)_wallclock.csv"), metadata)
 
-plot2 = plot_objective_gap_convergence(
-    records, method_names, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-loglog-noref.png"),
-    xscale_log=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
+params = DataFrame(
+    key = ["true_min_estimate", "num_points", "sigma", "alpha", "max_iter", "k_min", "k_max"],
+    value = [true_min_estimate, num_points, sigma, alpha, max_iter, k_min, k_max],
 )
+CSV.write(joinpath(data_folder, "$(experiment_name)_params.csv"), params)
 
-plot1_current = plot_objective_gap_convergence(
-    records, method_names, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    ylabel="Current Objective Gap",
-    filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-current-loglog.png"),
-    xscale_log=true,
-    plot_current=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)
+println("\nExperiment data saved to: $data_folder")
 
-plot2_current = plot_objective_gap_convergence(
-    records, method_names, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    ylabel="Current Objective Gap",
-    filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-current-loglog-noref.png"),
-    xscale_log=true,
-    plot_current=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)
+# # --- Create Plots from Experiment ---
+# # SGM vs Our Bundle Method Log-Log Plots (reference and no reference line), along with current objective vs minimum objective plots
+# records = [rpb_record, sgm_record]
+# method_names = [L"\textrm{RPB (Ours)}", L"\textrm{SGM}"]
+# plot1 = plot_objective_gap_convergence(
+#     records, method_names, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-loglog.pdf"),
+#     xscale_log=true,
 
-# All Bunde Methods Wall Clock Time Plot and Log-Log Plots
-records_bundles = [rpb_record, rcbm_record, pba_record]
-method_names_bundles = ["RPB (Ours)", "RCBM", "PBA"]
+#     show_reference=true,
+# )
 
-plot3 = plot_objective_gap_convergence(
-    records_bundles, method_names_bundles, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    xlabel="Time (seconds)",
-    filename=joinpath(results_folder, experiment_name * "-all-bundles-wallclock.png"),
-    wallclock=true,
-    wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time],
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)
+# plot2 = plot_objective_gap_convergence(
+#     records, method_names, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-loglog-noref.pdf"),
+#     xscale_log=true,
 
-plot4 = plot_objective_gap_convergence(
-    records_bundles, method_names_bundles, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    filename=joinpath(results_folder, experiment_name * "-all-bundles-loglog.png"),
-    xscale_log=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)
+#     show_reference=false,
+# )
 
-# All Methods Semilogx Plot and Log-Log Plot, and Wall Clock Plot
-records_all = [rpb_record, rcbm_record, pba_record, sgm_record]
-method_names_all = ["RPB (Ours)", "RCBM", "PBA", "SGM"]
+# plot1_current = plot_objective_gap_convergence(
+#     records, method_names, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-current-loglog.pdf"),
+#     xscale_log=true,
+#     plot_current=true,
 
-plot5 = plot_objective_gap_convergence(
-    records_all, method_names_all, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    filename=joinpath(results_folder, experiment_name * "-all-methods-semilogx.png"),
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)
+#     show_reference=false,
+# )
 
-plot6 = plot_objective_gap_convergence(
-    records_all, method_names_all, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    filename=joinpath(results_folder, experiment_name * "-all-methods-loglog.png"),
-    xscale_log=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)
+# plot2_current = plot_objective_gap_convergence(
+#     records, method_names, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-current-loglog-noref.pdf"),
+#     xscale_log=true,
+#     plot_current=true,
 
-plot7 = plot_objective_gap_convergence(
-    records_all, method_names_all, true_min_estimate;
-    title="Hyperbolic Signal Denoising: All Methods",
-    xlabel="Time (seconds)",
-    filename=joinpath(results_folder, experiment_name * "-all-methods-wallclock.png"),
-    wallclock=true,
-    wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time],
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)
+#     show_reference=false,
+# )
 
-# --- Bug check for outputs ---
-# Helper function to verify if iterates and directions lie on the manifold and tangent spaces, respectively.
-"""
-    verify_geometry(M, iterates, directions; atol=1e-12)
+# # All Bundle Methods Wall Clock Time Plot and Log-Log Plots
+# records_bundles = [rpb_record, rcbm_record, pba_record]
+# method_names_bundles = [L"\textrm{RPB (Ours)}", L"\textrm{RCBM}", L"\textrm{PBA}"]
 
-Verifies if a sequence of points lies on the manifold M and if the corresponding
-search directions lie in the tangent spaces at those points.
-Supports Power Manifolds of Hyperbolic space.
-"""
-function verify_geometry(M::PowerManifold, iterates, directions; atol=1e-12)
-    num_iters = min(length(iterates), length(directions))
-    base_H = M.manifold # The Hyperbolic(2) manifold
-    n_comp = length(iterates[1]) # Get actual number of components from first iterate
+# plot3 = plot_objective_gap_convergence(
+#     records_bundles, method_names_bundles, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-all-bundles-wallclock.pdf"),
+#     wallclock=true,
+#     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time],
 
-    println("--- Geometry Verification Report ---")
-    println("Total Iterations to check: $num_iters")
-    println("Components per Iteration: $n_comp")
-    println("Tolerance: $atol")
-    println("-"^35)
+#     show_reference=false,
+# )
 
-    p_ensemble_rmse_history = Float64[]
-    v_ensemble_rmse_history = Float64[]
+# # Short wallclock: x-axis limited to 5× the fastest finisher
+# bundles_fastest_time = minimum([rpb_total_time, rcbm_total_time, pba_total_time])
+# plot3_short = plot_objective_gap_convergence(
+#     records_bundles, method_names_bundles, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-all-bundles-wallclock-short.pdf"),
+#     wallclock=true,
+#     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time],
 
-    violation_found = false
+#     show_reference=false,
+#     max_x=5 * bundles_fastest_time,
+# )
 
-    for k in 1:num_iters
-        p_full = iterates[k]
-        v_full = directions[k]
+# plot4 = plot_objective_gap_convergence(
+#     records_bundles, method_names_bundles, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-all-bundles-loglog.pdf"),
+#     xscale_log=true,
 
-        # Keep track of all errors
-        p_errors = zeros(Float64, n_comp)
-        v_errors = zeros(Float64, n_comp)
+#     show_reference=false,
+# )
 
-        # Track the worst offending component in this iteration
-        max_p_drift = 0.0
-        max_v_drift = 0.0
+# # All Methods Semilogx Plot and Log-Log Plot, and Wall Clock Plot
+# records_all = [rpb_record, rcbm_record, pba_record, sgm_record]
+# method_names_all = [L"\textrm{RPB (Ours)}", L"\textrm{RCBM}", L"\textrm{PBA}", L"\textrm{SGM}"]
 
-        for i in 1:n_comp
-            p_i = get_component(M, p_full, i)
-            v_i = get_component(M, v_full, i)
+# plot5 = plot_objective_gap_convergence(
+#     records_all, method_names_all, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-all-methods-semilogx.pdf"),
 
-            # 1. Check Point: <p, p>_m should be -1
-            p_val = inner(base_H, p_i, p_i, p_i)
-            p_drift = abs(p_val + 1.0)
-            max_p_drift = max(max_p_drift, p_drift)
-            p_errors[i] = p_drift
+#     show_reference=false,
+# )
 
-            # 2. Check Tangency: <p, ξ>_m should be 0
-            # Note: inner(M, p, v, w) calculates the Minkowski product for Hyperbolic
-            v_drift = abs(inner(base_H, p_i, p_i, v_i))
-            max_v_drift = max(max_v_drift, v_drift)
-            v_errors[i] = v_drift
-        end
+# plot6 = plot_objective_gap_convergence(
+#     records_all, method_names_all, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-all-methods-loglog.pdf"),
+#     xscale_log=true,
 
-        # ensemble metric
-        p_ensemble_rmse = sqrt(mean(p_errors .^ 2))
-        v_ensemble_rmse = sqrt(mean(v_errors .^ 2))
+#     show_reference=false,
+# )
 
-        # report if above iteration 500 and divisible by 50 to reduce log spam
-        if k > 500 && mod(k, 50) == 0
-            # Report if this iteration exceeds tolerance
-            if max_p_drift > atol || max_v_drift > atol || p_ensemble_rmse > atol || v_ensemble_rmse > atol
-                violation_found = true
-                @info "Violation at Iteration $(k-1):" max_p_drift max_v_drift p_ensemble_rmse v_ensemble_rmse
-            end
-        end
-        push!(p_ensemble_rmse_history, p_ensemble_rmse)
-        push!(v_ensemble_rmse_history, v_ensemble_rmse)
-    end
+# plot7 = plot_objective_gap_convergence(
+#     records_all, method_names_all, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-all-methods-wallclock.pdf"),
+#     wallclock=true,
+#     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time],
 
-    if !violation_found
-        println("✅ All points and directions are geometrically valid.")
-    else
-        println("❌ Geometric violations detected (see log above).")
-    end
-    return p_ensemble_rmse_history, v_ensemble_rmse_history
-end
+#     show_reference=false,
+# )
+
+# # Short wallclock: x-axis limited to 5× the fastest finisher
+# all_fastest_time = minimum([rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time])
+# plot7_short = plot_objective_gap_convergence(
+#     records_all, method_names_all, true_min_estimate;
+#     filename=joinpath(results_folder, experiment_name * "-all-methods-wallclock-short.pdf"),
+#     wallclock=true,
+#     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time],
+
+#     show_reference=false,
+#     max_x=5 * all_fastest_time,
+# )
+
+# # --- Bug check for outputs ---
+# # Helper function to verify if iterates and directions lie on the manifold and tangent spaces, respectively.
+# """
+#     verify_geometry(M, iterates, directions; atol=1e-12)
+
+# Verifies if a sequence of points lies on the manifold M and if the corresponding
+# search directions lie in the tangent spaces at those points.
+# Supports Power Manifolds of Hyperbolic space.
+# """
+# function verify_geometry(M::PowerManifold, iterates, directions; atol=1e-12)
+#     num_iters = min(length(iterates), length(directions))
+#     base_H = M.manifold # The Hyperbolic(2) manifold
+#     n_comp = length(iterates[1]) # Get actual number of components from first iterate
+
+#     println("--- Geometry Verification Report ---")
+#     println("Total Iterations to check: $num_iters")
+#     println("Components per Iteration: $n_comp")
+#     println("Tolerance: $atol")
+#     println("-"^35)
+
+#     p_ensemble_rmse_history = Float64[]
+#     v_ensemble_rmse_history = Float64[]
+
+#     violation_found = false
+
+#     for k in 1:num_iters
+#         p_full = iterates[k]
+#         v_full = directions[k]
+
+#         # Keep track of all errors
+#         p_errors = zeros(Float64, n_comp)
+#         v_errors = zeros(Float64, n_comp)
+
+#         # Track the worst offending component in this iteration
+#         max_p_drift = 0.0
+#         max_v_drift = 0.0
+
+#         for i in 1:n_comp
+#             p_i = get_component(M, p_full, i)
+#             v_i = get_component(M, v_full, i)
+
+#             # 1. Check Point: <p, p>_m should be -1
+#             p_val = inner(base_H, p_i, p_i, p_i)
+#             p_drift = abs(p_val + 1.0)
+#             max_p_drift = max(max_p_drift, p_drift)
+#             p_errors[i] = p_drift
+
+#             # 2. Check Tangency: <p, ξ>_m should be 0
+#             # Note: inner(M, p, v, w) calculates the Minkowski product for Hyperbolic
+#             v_drift = abs(inner(base_H, p_i, p_i, v_i))
+#             max_v_drift = max(max_v_drift, v_drift)
+#             v_errors[i] = v_drift
+#         end
+
+#         # ensemble metric
+#         p_ensemble_rmse = sqrt(mean(p_errors .^ 2))
+#         v_ensemble_rmse = sqrt(mean(v_errors .^ 2))
+
+#         # report if above iteration 500 and divisible by 50 to reduce log spam
+#         if k > 500 && mod(k, 50) == 0
+#             # Report if this iteration exceeds tolerance
+#             if max_p_drift > atol || max_v_drift > atol || p_ensemble_rmse > atol || v_ensemble_rmse > atol
+#                 violation_found = true
+#                 @info "Violation at Iteration $(k-1):" max_p_drift max_v_drift p_ensemble_rmse v_ensemble_rmse
+#             end
+#         end
+#         push!(p_ensemble_rmse_history, p_ensemble_rmse)
+#         push!(v_ensemble_rmse_history, v_ensemble_rmse)
+#     end
+
+#     if !violation_found
+#         println("✅ All points and directions are geometrically valid.")
+#     else
+#         println("❌ Geometric violations detected (see log above).")
+#     end
+#     return p_ensemble_rmse_history, v_ensemble_rmse_history
+# end
 
 
-# recover list of iterates (proximal centers)
-pba_iterates = get_record(pba, :Iteration, :Iterate)
-pba_search_directions = get_record(pba, :Iteration, :X)
-rcbm_iterates = get_record(rcbm, :Iteration, :Iterate)
-rcbm_search_directions = get_record(rcbm, :Iteration, :X)
+# # recover list of iterates (proximal centers)
+# pba_iterates = get_record(pba, :Iteration, :Iterate)
+# pba_search_directions = get_record(pba, :Iteration, :X)
+# rcbm_iterates = get_record(rcbm, :Iteration, :Iterate)
+# rcbm_search_directions = get_record(rcbm, :Iteration, :X)
 
-# check if iterates are actually on the manifold for other bundle methods
-println("\n--- Verifying PBA Geometry ---")
-pba_p_rmse_history, pba_v_rmse_history = verify_geometry(Hn, pba_iterates, pba_search_directions; atol=1e-12)
-println("\n--- Verifying RCBM Geometry ---")
-rcbm_p_rmse_history, rcbm_v_rmse_history = verify_geometry(Hn, rcbm_iterates, rcbm_search_directions; atol=1e-12)
+# # check if iterates are actually on the manifold for other bundle methods
+# println("\n--- Verifying PBA Geometry ---")
+# pba_p_rmse_history, pba_v_rmse_history = verify_geometry(Hn, pba_iterates, pba_search_directions; atol=1e-12)
+# println("\n--- Verifying RCBM Geometry ---")
+# rcbm_p_rmse_history, rcbm_v_rmse_history = verify_geometry(Hn, rcbm_iterates, rcbm_search_directions; atol=1e-12)
 
-# --- Run Phase 2 Again for SGM and RPB for much longer since they are fast ---
-println("\n=== PHASE 3: Extended runs for SGM and RPB ===")
-sgm_kwargs_phase3 = [
-    :cache => (:LRU, [:Cost, :SubGradient], 50),
-    :record => [:Iteration, :Cost, :Iterate],
-    :return_state => true,
-    :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
-    :stopping_criterion => StopWhenCostLess(true_min_estimate + PHASE2_GAP_TOL) | StopAfterIteration(extended_max_iter),
-]
+# # --- Run Phase 2 Again for SGM and RPB for much longer since they are fast ---
+# println("\n=== PHASE 3: Extended runs for SGM and RPB ===")
+# sgm_kwargs_phase3 = [
+#     :cache => (:LRU, [:Cost, :SubGradient], 50),
+#     :record => [:Iteration, :Cost, :Iterate],
+#     :return_state => true,
+#     :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
+#     :stopping_criterion => StopWhenCostLess(true_min_estimate + PHASE2_GAP_TOL) | StopAfterIteration(extended_max_iter),
+# ]
 
-rpb_kwargs_phase3 = [
-    :max_iter => extended_max_iter,
-    :tolerance => PHASE2_GAP_TOL,
-    :proximal_parameter => 1.0/num_points,
-    :trust_parameter => 0.001,
-    :know_minimizer => true,
-    :relative_error => false,
-    :true_min_obj => true_min_estimate,
-]
+# rpb_kwargs_phase3 = [
+#     :max_iter => extended_max_iter,
+#     :tolerance => PHASE2_GAP_TOL,
+#     :proximal_parameter => 1.0/num_points,
+#     :trust_parameter => 0.001,
+#     :know_minimizer => true,
+#     :relative_error => false,
+#     :true_min_obj => true_min_estimate,
+# ]
 
-# Run extended SGM
-println("Running extended SGM...")
-sgm_extended_start_time = time()
-sgm_extended = subgradient_method(Hn, f, subgradient_of_f, noise;
-    sgm_kwargs_phase3...)
-sgm_extended_end_time = time()
-sgm_extended_total_time = sgm_extended_end_time - sgm_extended_start_time
-println("Extended SGM total time: $sgm_extended_total_time seconds")
-sgm_extended_result = get_solver_result(sgm_extended)
-sgm_extended_record = get_record(sgm_extended)
-# Add initial entry to SGM record to match RPB
-sgm_extended_record = [initial_entry; sgm_extended_record]
+# # Run extended SGM
+# println("Running extended SGM...")
+# sgm_extended_start_time = time()
+# sgm_extended = subgradient_method(Hn, f, subgradient_of_f, noise;
+#     sgm_kwargs_phase3...)
+# sgm_extended_end_time = time()
+# sgm_extended_total_time = sgm_extended_end_time - sgm_extended_start_time
+# println("Extended SGM total time: $sgm_extended_total_time seconds")
+# sgm_extended_result = get_solver_result(sgm_extended)
+# sgm_extended_record = get_record(sgm_extended)
+# # Add initial entry to SGM record to match RPB
+# sgm_extended_record = [initial_entry; sgm_extended_record]
 
-# Run extended RPB
-println("Running extended RPB...")
-rpb_extended_start_time = time()
-rpb_extended_solver = RProximalBundle(
-    Hn, retraction_map, transport_map_projection,
-    (x) -> f(Hn, x), (x) -> subgradient_of_f(Hn, x),
-    noise, initial_objective, initial_subgradient; 
-    max_iter=extended_max_iter, tolerance=PHASE2_GAP_TOL,
-    proximal_parameter=1.0/num_points, trust_parameter=0.001, know_minimizer=true, relative_error=false,
-    true_min_obj=true_min_estimate
-)
-run!(rpb_extended_solver)
-rpb_extended_end_time = time()
-rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
-println("Extended RPB total time: $rpb_extended_total_time seconds")
+# # Run extended RPB
+# println("Running extended RPB...")
+# rpb_extended_start_time = time()
+# rpb_extended_solver = RProximalBundle(
+#     Hn, retraction_map, transport_map_projection,
+#     (x) -> f(Hn, x), (x) -> subgradient_of_f(Hn, x),
+#     noise, initial_objective, initial_subgradient; 
+#     max_iter=extended_max_iter, tolerance=PHASE2_GAP_TOL,
+#     proximal_parameter=1.0/num_points, trust_parameter=0.001, know_minimizer=true, relative_error=false,
+#     true_min_obj=true_min_estimate
+# )
+# run!(rpb_extended_solver)
+# rpb_extended_end_time = time()
+# rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
+# println("Extended RPB total time: $rpb_extended_total_time seconds")
 
-# Convert RPB results to match expected format (iteration, objective, iterate) tuples
-rpb_extended_iterations = collect(0:length(rpb_extended_solver.raw_objective_history)-1)
-rpb_extended_objectives = rpb_extended_solver.raw_objective_history
-rpb_extended_iterates = rpb_extended_solver.proximal_center_history
-rpb_extended_record = [(iter, obj, iterate) for (iter, obj, iterate) in zip(rpb_extended_iterations, rpb_extended_objectives, rpb_extended_iterates)]
-rpb_extended_result = rpb_extended_solver.current_proximal_center
-# Add initial entry to RPB record to match SGM
-rpb_extended_record = [initial_entry; rpb_extended_record]
-# Create wall clock time record for extended RPB with per-iteration average timing
-rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
+# # Convert RPB results to match expected format (iteration, objective, iterate) tuples
+# rpb_extended_iterations = collect(0:length(rpb_extended_solver.raw_objective_history)-1)
+# rpb_extended_objectives = rpb_extended_solver.raw_objective_history
+# rpb_extended_iterates = rpb_extended_solver.proximal_center_history
+# rpb_extended_record = [(iter, obj, iterate) for (iter, obj, iterate) in zip(rpb_extended_iterations, rpb_extended_objectives, rpb_extended_iterates)]
+# rpb_extended_result = rpb_extended_solver.current_proximal_center
+# # Add initial entry to RPB record to match SGM
+# rpb_extended_record = [initial_entry; rpb_extended_record]
+# # Create wall clock time record for extended RPB with per-iteration average timing
+# rpb_extended_total_time = rpb_extended_end_time - rpb_extended_start_time
 
-# --- Create Plots from Extended Experiment ---
-# SGM vs Our Bundle Method Log-Log Plots (reference and no reference line)
-records_extended = [rpb_extended_record, sgm_extended_record]
-method_names_extended = ["RPB (Ours)", "SGM"]
-plot7 = plot_objective_gap_convergence(
-    records_extended, method_names_extended, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog.png"),
-    xscale_log=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=true,
-)   
-plot8 = plot_objective_gap_convergence(
-    records_extended, method_names_extended, true_min_estimate;
-    title="Hyperbolic Signal Denoising",
-    filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog-noref.png"),
-    xscale_log=true,
-    manifold_constraint_mode=2,
-    manifold=Hn,
-    manifold_tolerance=1e-9,
-    show_reference=false,
-)   
+# # --- Create Plots from Extended Experiment ---
+# # SGM vs Our Bundle Method Log-Log Plots (reference and no reference line)
+# records_extended = [rpb_extended_record, sgm_extended_record]
+# method_names_extended = ["RPB (Ours)", "SGM"]
+# plot7 = plot_objective_gap_convergence(
+#     records_extended, method_names_extended, true_min_estimate;
+#     title="Hyperbolic Signal Denoising",
+#     filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog.png"),
+#     xscale_log=true,
+#     manifold_constraint_mode=2,
+#     manifold=Hn,
+#     manifold_tolerance=1e-9,
+#     show_reference=true,
+# )   
+# plot8 = plot_objective_gap_convergence(
+#     records_extended, method_names_extended, true_min_estimate;
+#     title="Hyperbolic Signal Denoising",
+#     filename=joinpath(results_folder, experiment_name * "-extended-sgm-vs-rpb-loglog-noref.png"),
+#     xscale_log=true,
+#     manifold_constraint_mode=2,
+#     manifold=Hn,
+#     manifold_tolerance=1e-9,
+#     show_reference=false,
+# )   
 
-# print wall-clock times from phase 2 and phase 3
-println("\nWall-clock times for all methods in Phase 2:")
-println("  RPB total time: $rpb_total_time seconds")
-println("  RCBM total time: $rcbm_total_time seconds")
-println("  PBA total time: $pba_total_time seconds")
-println("  SGM total time: $sgm_total_time seconds")
+# # print wall-clock times from phase 2 and phase 3
+# println("\nWall-clock times for all methods in Phase 2:")
+# println("  RPB total time: $rpb_total_time seconds")
+# println("  RCBM total time: $rcbm_total_time seconds")
+# println("  PBA total time: $pba_total_time seconds")
+# println("  SGM total time: $sgm_total_time seconds")
 
-println("\nWall-clock times for extended methods:")
-println("  Extended RPB total time: $rpb_extended_total_time seconds")
-println("  Extended SGM total time: $sgm_extended_total_time seconds")
+# println("\nWall-clock times for extended methods:")
+# println("  Extended RPB total time: $rpb_extended_total_time seconds")
+# println("  Extended SGM total time: $sgm_extended_total_time seconds")

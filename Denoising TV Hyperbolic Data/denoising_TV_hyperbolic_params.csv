@@ -1,0 +1,8 @@
+key,value
+true_min_estimate,0.3653568795558258
+num_points,496.0
+sigma,0.3
+alpha,0.5
+max_iter,100000.0
+k_min,-1.0
+k_max,0.0
