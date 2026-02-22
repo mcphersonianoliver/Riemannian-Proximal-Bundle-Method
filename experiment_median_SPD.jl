@@ -2,15 +2,12 @@
 using PrettyTables
 using BenchmarkTools, Statistics
 using CSV, DataFrames
-using ColorSchemes, Plots, Plots.PlotMeasures, LaTeXStrings
 using QuadraticModels, RipQP
 using LinearAlgebra, LRUCache, Random
 using ManifoldDiff, Manifolds, Manopt, ManoptExamples
 
 # Include custom Riemannian Proximal Bundle solver
 include("src/RiemannianProximalBundle.jl")
-
-pgfplotsx()
 
 # Helper function for inner product (used by RPB solver)
 function inner_product(M, p, X, Y)
@@ -65,6 +62,16 @@ seed_argument = 57
 atol = 1e-12
 N = 20 # number of data points
 spd_dims = [3, 5, 15, 30, 55]
+
+# Data folder for saving objective gaps (separated from plotting)
+data_folder = joinpath(@__DIR__, "RCBM Median $N Points")
+isdir(data_folder) || mkpath(data_folder)
+
+function save_record_csv(data_folder, prefix, method_name, record)
+    df = DataFrame(iteration = [r[1] for r in record], objective = [r[2] for r in record])
+    CSV.write(joinpath(data_folder, "$(prefix)_$(method_name)_objectives.csv"), df)
+    println("  Saved $(method_name) objectives to CSV")
+end
 
 # Generate a point that is at most `tol` close to the point `p` on `M`
 function close_point(M, p, tol; retraction_method=Manifolds.default_retraction_method(M, typeof(p)))
@@ -251,214 +258,6 @@ function write_dataframes(B1, B2, results_folder, experiment_name, subexperiment
         B2;
         append=true,
     )
-end
-
-function plot_objective_gap_convergence(records, method_names, dimension, true_min_estimate;
-                                       title=nothing,
-                                       xlabel=nothing,
-                                       ylabel=nothing,
-                                       filename=nothing,
-                                       wallclock=false,
-                                       wallclock_times=nothing,
-                                       offset_iterations=false,
-                                       ylims_lower=nothing,
-                                       max_x=nothing)
-    # Set default titles and labels based on plot type
-    # if title === nothing
-    #     title = latexstring("\\textrm{Riemannian Median: SPD } $dimension \\times $dimension \\textrm{ Matrices}")
-    # end
-    if ylabel === nothing
-        ylabel = L"\textrm{Minimum Objective Gap}"
-    end
-    if xlabel === nothing
-        xlabel = wallclock ? L"\textrm{Time (seconds)}" : L"\textrm{Oracle Calls}"
-    end
-
-    # Initialize plot
-    p = plot(
-        xlabel=xlabel,
-        ylabel=ylabel,
-        yscale=:log10,
-        legend=:topright,
-        size=(600, 400),
-        guidefontsize=12,
-        tickfontsize=10,
-        legendfontsize=10,
-        background_color_legend=:white,
-        foreground_color_legend=:black,
-        grid=true,
-        linewidth=wallclock ? 2 : 1,
-        margin=5mm,
-        extra_kwargs=Dict(:subplot => Dict("width" => raw"12cm", "height" => raw"8cm")),
-    )
-
-    # Define color map for methods (same style as experiment_denoising_hyperbolic.jl)
-    # FO variants share the same color as their exponential counterparts
-    color_map = Dict(
-        L"\textrm{RPB (Ours)}" => "#785ef0",    # Purple
-        L"\textrm{RPB-FO (Ours)}" => "#785ef0", # Purple (dashed)
-        L"\textrm{RCBM}" => "#fe6100",          # Orange
-        L"\textrm{RCBM-FO}" => "#fe6100",       # Orange (dashed)
-        L"\textrm{PBA}" => "#dc267f",           # Pink/Magenta
-        L"\textrm{PBA-FO}" => "#dc267f",        # Pink/Magenta (dashed)
-        L"\textrm{SGM}" => "#ffb000",           # Gold/Yellow
-        L"\textrm{SGM-FO}" => "#ffb000",        # Gold/Yellow (dashed)
-    )
-    # Fallback colors if method not found in map
-    fallback_colors = ["#785ef0", "#dc267f", "#fe6100", "#ffb000", "#333333"]
-
-    # Define line style map: solid for exponential, dashed for first-order
-    line_style_map = Dict(
-        L"\textrm{RPB (Ours)}" => :solid,
-        L"\textrm{RPB-FO (Ours)}" => :dash,
-        L"\textrm{RCBM}" => :solid,
-        L"\textrm{RCBM-FO}" => :dash,
-        L"\textrm{PBA}" => :solid,
-        L"\textrm{PBA-FO}" => :dash,
-        L"\textrm{SGM}" => :solid,
-        L"\textrm{SGM-FO}" => :dash,
-    )
-    # Fallback line styles
-    fallback_line_styles = [:solid, :dash, :solid, :dash, :solid, :dash, :solid, :dash]
-
-    if wallclock && wallclock_times !== nothing
-        # Wall-clock time plotting with time_records
-        time_records = records  # In wall-clock mode, records are actually time_records
-
-        # Find the maximum time duration across all methods
-        max_time_across_all = 0.0
-        for time_record in time_records
-            if !isempty(time_record)
-                times = [r[1] for r in time_record]
-                max_time_across_all = max(max_time_across_all, maximum(times))
-            end
-        end
-
-        # Calculate 15% of the longest time duration
-        time_cutoff_global = 1 * max_time_across_all
-
-        for (i, (time_record, name)) in enumerate(zip(time_records, method_names))
-            if !isempty(time_record)
-                times = [r[1] for r in time_record]
-                objective_gaps = [max(r[2] - true_min_estimate, 1e-16) for r in time_record]
-
-                # Calculate minimum objective gap seen so far (cumulative minimum)
-                min_gaps_so_far = [minimum(objective_gaps[1:j]) for j in 1:length(objective_gaps)]
-
-                # Limit to first 15% of the LONGEST time duration across all methods
-                time_indices = times .<= time_cutoff_global
-                times_limited = times[time_indices]
-                min_gaps_limited = min_gaps_so_far[time_indices]
-
-                # Filter out non-positive values for log scale
-                valid_indices = (times_limited .>= 0) .& (min_gaps_limited .> 0)
-                valid_times = times_limited[valid_indices]
-                valid_gaps = min_gaps_limited[valid_indices]
-
-                # Downsample to at most 2000 points per line
-                n_pts = length(valid_times)
-                if n_pts > 2000
-                    stride = cld(n_pts, 2000)
-                    valid_times = valid_times[1:stride:end]
-                    valid_gaps = valid_gaps[1:stride:end]
-                end
-
-                if !isempty(valid_times)
-                    plot_color = get(color_map, name, fallback_colors[mod1(i, length(fallback_colors))])
-                    plot_linestyle = get(line_style_map, name, fallback_line_styles[mod1(i, length(fallback_line_styles))])
-                    # Suppress legend entry for FO variants (solid vs dashed explained in caption)
-                    plot_label = contains(string(name), "-FO") ? "" : name
-                    plot!(p, valid_times, valid_gaps,
-                          label=plot_label,
-                          color=plot_color,
-                          linestyle=plot_linestyle,
-                          linewidth=2)
-                end
-            end
-        end
-    else
-        # Iteration-based plotting
-        # Find the maximum number of iterations across all methods
-        max_iterations_across_all = 0
-        for record in records
-            if !isempty(record)
-                max_iterations_across_all = max(max_iterations_across_all, length(record))
-            end
-        end
-
-        # Calculate 15% of the longest iteration amount
-        max_iter_idx_global = max(1, Int(ceil(1 * max_iterations_across_all)))
-
-        for (i, (record, name)) in enumerate(zip(records, method_names))
-            if !isempty(record)
-                # Handle iteration numbering
-                if offset_iterations
-                    iterations = [r[1] + 1 for r in record]
-                    valid_threshold = 0  # For offset iterations, use > 0
-                else
-                    iterations = [r[1] for r in record]
-                    valid_threshold = -1  # For non-offset, use >= 0
-                end
-
-                objective_gaps = [max(r[2] - true_min_estimate, 1e-16) for r in record]
-
-                # Calculate minimum objective gap seen so far (cumulative minimum)
-                min_gaps_so_far = [minimum(objective_gaps[1:j]) for j in 1:length(objective_gaps)]
-
-                # Limit to first 15% of the LONGEST iteration amount across all methods
-                actual_limit = min(max_iter_idx_global, length(iterations))
-                iterations_limited = iterations[1:actual_limit]
-                min_gaps_limited = min_gaps_so_far[1:actual_limit]
-
-                # Filter out non-positive values for log scale
-                valid_indices = (iterations_limited .> valid_threshold) .& (min_gaps_limited .> 0)
-                valid_iterations = iterations_limited[valid_indices]
-                valid_gaps = min_gaps_limited[valid_indices]
-
-                # Downsample to at most 2000 points per line
-                n_pts = length(valid_iterations)
-                if n_pts > 2000
-                    stride = cld(n_pts, 2000)
-                    valid_iterations = valid_iterations[1:stride:end]
-                    valid_gaps = valid_gaps[1:stride:end]
-                end
-
-                if !isempty(valid_iterations)
-                    plot_color = get(color_map, name, fallback_colors[mod1(i, length(fallback_colors))])
-                    plot_linestyle = get(line_style_map, name, fallback_line_styles[mod1(i, length(fallback_line_styles))])
-                    # Suppress legend entry for FO variants (solid vs dashed explained in caption)
-                    plot_label = contains(string(name), "-FO") ? "" : name
-
-                    plot!(p, valid_iterations, valid_gaps,
-                        label=plot_label,
-                        color=plot_color,
-                        linestyle=plot_linestyle,
-                        linewidth=1)
-                end
-            end
-        end
-    end
-
-    # Apply axis limits
-    if ylims_lower !== nothing
-        current_ylims = Plots.ylims(p)
-        ylims!(p, (ylims_lower, current_ylims[2]))
-    end
-    # X-axis: start at first iteration number (1 for offset iterations, 0 for wallclock/non-offset)
-    x_start = (!wallclock && offset_iterations) ? 1 : 0
-    if max_x !== nothing
-        xlims!(p, (x_start, max_x))
-    else
-        current_xlims = Plots.xlims(p)
-        xlims!(p, (x_start, current_xlims[2]))
-    end
-
-    if filename !== nothing
-        savefig(p, filename)
-        println("Plot saved to: $filename")
-    end
-
-    return p
 end
 
 # --- Riemannian Median Experiment on SPD Manifold ---
@@ -804,87 +603,51 @@ for n in spd_dims
 
         println("Phase 2 complete. SPD dimension $n")
 
-        # --- Assemble records for all methods ---
-        # Order: exponential methods paired with their FO counterparts
-        records_all = [
-            rpb_record, rpb_fo_record,
-            rcbm_record, rcbm_fo_record,
-            pba_record, pba_fo_record,
-            sgm_record, sgm_fo_record,
-        ]
-        time_records_all = [
-            rpb_time_record, rpb_fo_time_record,
-            rcbm_time_record, rcbm_fo_time_record,
-            pba_time_record, pba_fo_time_record,
-            sgm_time_record, sgm_fo_time_record,
-        ]
-        method_names_all = [
-            L"\textrm{RPB (Ours)}", L"\textrm{RPB-FO (Ours)}",
-            L"\textrm{RCBM}", L"\textrm{RCBM-FO}",
-            L"\textrm{PBA}", L"\textrm{PBA-FO}",
-            L"\textrm{SGM}", L"\textrm{SGM-FO}",
-        ]
+        # --- Save objective gaps to CSV and free solver state ---
+        dim_prefix = "spd_$(n)x$(n)"
 
-        # No-PBA subset (exclude PBA and PBA-FO)
-        nopba_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "PBA")]
-        records_nopba = records_all[nopba_indices]
-        time_records_nopba = time_records_all[nopba_indices]
-        method_names_nopba = method_names_all[nopba_indices]
+        # Save iteration-based records
+        save_record_csv(data_folder, dim_prefix, "rpb", rpb_record)
+        save_record_csv(data_folder, dim_prefix, "rpb_fo", rpb_fo_record)
+        save_record_csv(data_folder, dim_prefix, "rcbm", rcbm_record)
+        save_record_csv(data_folder, dim_prefix, "rcbm_fo", rcbm_fo_record)
+        save_record_csv(data_folder, dim_prefix, "pba", pba_record)
+        save_record_csv(data_folder, dim_prefix, "pba_fo", pba_fo_record)
+        save_record_csv(data_folder, dim_prefix, "sgm", sgm_record)
+        save_record_csv(data_folder, dim_prefix, "sgm_fo", sgm_fo_record)
 
-        # Bundles-only subset (exclude SGM and SGM-FO)
-        bundles_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "SGM")]
-        records_bundles = records_all[bundles_indices]
-        time_records_bundles = time_records_all[bundles_indices]
-        method_names_bundles = method_names_all[bundles_indices]
+        # Save wall clock times
+        wallclock_df = DataFrame(
+            method = ["RPB", "RPB-FO", "RCBM", "RCBM-FO", "PBA", "PBA-FO", "SGM", "SGM-FO"],
+            wallclock_seconds = [
+                rpb_end_time - rpb_start_time,
+                rpb_fo_end_time - rpb_fo_start_time,
+                rcbm_end_time - rcbm_start_time,
+                rcbm_fo_end_time - rcbm_fo_start_time,
+                pba_end_time - pba_start_time,
+                pba_fo_end_time - pba_fo_start_time,
+                sgm_end_time - sgm_start_time,
+                sgm_fo_end_time - sgm_fo_start_time,
+            ],
+        )
+        CSV.write(joinpath(data_folder, "$(dim_prefix)_wallclock.csv"), wallclock_df)
 
-        # --- Compute 5× shortest method cutoffs for "short" plots ---
-        # Iteration-based: shortest = fewest records
-        shortest_iter_all = minimum(length(r) for r in records_all)
-        iter_cutoff_all = 5 * shortest_iter_all
-        shortest_iter_nopba = minimum(length(r) for r in records_nopba)
-        iter_cutoff_nopba = 5 * shortest_iter_nopba
-        shortest_iter_bundles = minimum(length(r) for r in records_bundles)
-        iter_cutoff_bundles = 5 * shortest_iter_bundles
+        # Save experiment parameters
+        params_df = DataFrame(
+            key = ["true_min_estimate", "N", "n", "seed", "atol", "maxiter"],
+            value = [true_min_estimate, N, n, seed_argument, atol, maxiter],
+        )
+        CSV.write(joinpath(data_folder, "$(dim_prefix)_params.csv"), params_df)
 
-        # Wall-clock: shortest = smallest max time
-        shortest_time_all = minimum(maximum(r[1] for r in tr) for tr in time_records_all)
-        time_cutoff_all = 5 * shortest_time_all
-        shortest_time_nopba = minimum(maximum(r[1] for r in tr) for tr in time_records_nopba)
-        time_cutoff_nopba = 5 * shortest_time_nopba
-        shortest_time_bundles = minimum(maximum(r[1] for r in tr) for tr in time_records_bundles)
-        time_cutoff_bundles = 5 * shortest_time_bundles
+        println("Data saved to: $data_folder (prefix: $dim_prefix)")
 
-        # --- Generate plots ---
-        # For each plot type, create: all methods (full + short), no-PBA (full + short)
-        for (subset_name, rec, trec, names, iter_cut, time_cut) in [
-            ("", records_all, time_records_all, method_names_all, iter_cutoff_all, time_cutoff_all),
-            ("_nopba", records_nopba, time_records_nopba, method_names_nopba, iter_cutoff_nopba, time_cutoff_nopba),
-            ("_bundles", records_bundles, time_records_bundles, method_names_bundles, iter_cutoff_bundles, time_cutoff_bundles),
-        ]
-            # Convergence gap (offset iterations = oracle calls)
-            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
-                filename=joinpath(results_folder, "convergence_gap$(subset_name)_spd_$(n)x$(n).pdf"),
-                offset_iterations=true, ylims_lower=atol)
-            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
-                filename=joinpath(results_folder, "convergence_gap$(subset_name)_short_spd_$(n)x$(n).pdf"),
-                offset_iterations=true, ylims_lower=atol, max_x=iter_cut)
-
-            # Semi-log (no offset)
-            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
-                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_spd_$(n)x$(n).pdf"),
-                offset_iterations=false, ylims_lower=atol)
-            plot_objective_gap_convergence(rec, names, n, true_min_estimate;
-                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_short_spd_$(n)x$(n).pdf"),
-                offset_iterations=false, ylims_lower=atol, max_x=iter_cut)
-
-            # Wall-clock time
-            plot_objective_gap_convergence(trec, names, n, true_min_estimate;
-                filename=joinpath(results_folder, "wallclock_gap$(subset_name)_spd_$(n)x$(n).pdf"),
-                wallclock=true, ylims_lower=atol)
-            plot_objective_gap_convergence(trec, names, n, true_min_estimate;
-                filename=joinpath(results_folder, "wallclock_gap$(subset_name)_short_spd_$(n)x$(n).pdf"),
-                wallclock=true, ylims_lower=atol, max_x=time_cut)
-        end
+        # Free Phase 1 and Phase 2 solver state
+        rpb_solver = nothing; rpb_fo_solver = nothing
+        rpb_solver_phase1 = nothing; rpb_fo_solver_phase1 = nothing
+        rcbm = nothing; rcbm_fo = nothing
+        pba = nothing; pba_fo = nothing; pba_phase1 = nothing
+        sgm = nothing; sgm_fo = nothing; sgm_phase1 = nothing
+        GC.gc()
 
     else
         # Original single-phase approach
@@ -966,54 +729,6 @@ for n in spd_dims
         sgm_fo_record = vcat([initial_entry], sgm_fo_record_raw)
 
         println("Completed SPD dimension $n")
-
-        records_all = [
-            rpb_record, rpb_fo_record,
-            rcbm_record, rcbm_fo_record,
-            pba_record, pba_fo_record,
-            sgm_record, sgm_fo_record,
-        ]
-        method_names_all = [
-            L"\textrm{RPB (Ours)}", L"\textrm{RPB-FO (Ours)}",
-            L"\textrm{RCBM}", L"\textrm{RCBM-FO}",
-            L"\textrm{PBA}", L"\textrm{PBA-FO}",
-            L"\textrm{SGM}", L"\textrm{SGM-FO}",
-        ]
-
-        # Estimate true minimum from all final objective values
-        all_final_objectives = [minimum([r[2] for r in record]) for record in records_all]
-        true_min_estimate_single = minimum(all_final_objectives)
-
-        # No-PBA subset
-        nopba_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "PBA")]
-        records_nopba = records_all[nopba_indices]
-        method_names_nopba = method_names_all[nopba_indices]
-
-        # Bundles-only subset (exclude SGM and SGM-FO)
-        bundles_indices = [i for i in 1:length(method_names_all) if !contains(string(method_names_all[i]), "SGM")]
-        records_bundles = records_all[bundles_indices]
-        method_names_bundles = method_names_all[bundles_indices]
-
-        # Compute 5× shortest method cutoffs (iteration-based only in single-phase)
-        shortest_iter_all = minimum(length(r) for r in records_all)
-        iter_cutoff_all = 5 * shortest_iter_all
-        shortest_iter_nopba = minimum(length(r) for r in records_nopba)
-        iter_cutoff_nopba = 5 * shortest_iter_nopba
-        shortest_iter_bundles = minimum(length(r) for r in records_bundles)
-        iter_cutoff_bundles = 5 * shortest_iter_bundles
-
-        for (subset_name, rec, names, iter_cut) in [
-            ("", records_all, method_names_all, iter_cutoff_all),
-            ("_nopba", records_nopba, method_names_nopba, iter_cutoff_nopba),
-            ("_bundles", records_bundles, method_names_bundles, iter_cutoff_bundles),
-        ]
-            plot_objective_gap_convergence(rec, names, n, true_min_estimate_single;
-                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_spd_$(n)x$(n).pdf"),
-                offset_iterations=false, ylims_lower=atol)
-            plot_objective_gap_convergence(rec, names, n, true_min_estimate_single;
-                filename=joinpath(results_folder, "convergence_semilog$(subset_name)_short_spd_$(n)x$(n).pdf"),
-                offset_iterations=false, ylims_lower=atol, max_x=iter_cut)
-        end
     end
 
     if benchmarking

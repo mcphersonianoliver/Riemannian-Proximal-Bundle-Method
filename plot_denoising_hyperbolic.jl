@@ -48,6 +48,7 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                                    plot_current=false,
                                    xscale_log=false,
                                    show_reference=true,
+                                   show_legend=true,
                                    wallclock=false,
                                    wallclock_times=nothing,
                                    ylims=(0.00001, Inf),
@@ -65,20 +66,20 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
         yscale=:log10,
         xscale=xscale_log ? :log10 : :identity,
         ylims=ylims,
-        legend=:topright,
+        legend=show_legend ? :topright : false,
         size=(600, 400),
-        guidefontsize=12,
-        tickfontsize=10,
-        legendfontsize=10,
-        legendtitlefontsize=10,
+        guidefontsize=18,
+        tickfontsize=14,
+        legendfontsize=14,
+        legendtitlefontsize=14,
         background_color_legend=:white,
         foreground_color_legend=:black,
         grid=true,
         gridcolor=:lightgray,
         gridwidth=0.5,
         gridalpha=0.3,
-        linewidth=1,
-        margin=5mm,
+        linewidth=2.5,
+        margin=1mm,
         extra_kwargs=Dict(:subplot => Dict("width" => raw"12cm", "height" => raw"8cm")),
     )
 
@@ -140,7 +141,7 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                 plot!(p, valid_x_values, valid_gaps,
                     label=name,
                     color=plot_color,
-                    linewidth=1,
+                    linewidth=2.5,
                     markershape=:circle,
                     markersize=0,
                     markerstrokewidth=0)
@@ -167,7 +168,7 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                 label=L"O(1/\sqrt{k})",
                 color=:gray,
                 linestyle=:dot,
-                linewidth=1)
+                linewidth=2.5)
         end
     end
 
@@ -195,6 +196,7 @@ plot1 = plot_objective_gap_convergence(
     filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-loglog.pdf"),
     xscale_log=true,
     show_reference=true,
+    show_legend=false,
 )
 
 plot2 = plot_objective_gap_convergence(
@@ -202,6 +204,7 @@ plot2 = plot_objective_gap_convergence(
     filename=joinpath(results_folder, experiment_name * "-sgm-vs-rpb-loglog-noref.pdf"),
     xscale_log=true,
     show_reference=false,
+    show_legend=false,
 )
 
 plot1_current = plot_objective_gap_convergence(
@@ -210,6 +213,7 @@ plot1_current = plot_objective_gap_convergence(
     xscale_log=true,
     plot_current=true,
     show_reference=false,
+    show_legend=false,
 )
 
 plot2_current = plot_objective_gap_convergence(
@@ -218,6 +222,7 @@ plot2_current = plot_objective_gap_convergence(
     xscale_log=true,
     plot_current=true,
     show_reference=false,
+    show_legend=false,
 )
 
 # All Bundle Methods
@@ -230,6 +235,7 @@ plot3 = plot_objective_gap_convergence(
     wallclock=true,
     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time],
     show_reference=false,
+    ylabel="",
 )
 
 bundles_fastest_time = minimum([rpb_total_time, rcbm_total_time, pba_total_time])
@@ -240,6 +246,7 @@ plot3_short = plot_objective_gap_convergence(
     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time],
     show_reference=false,
     max_x=5 * bundles_fastest_time,
+    ylabel="",
 )
 
 plot4 = plot_objective_gap_convergence(
@@ -247,6 +254,7 @@ plot4 = plot_objective_gap_convergence(
     filename=joinpath(results_folder, experiment_name * "-all-bundles-loglog.pdf"),
     xscale_log=true,
     show_reference=false,
+    show_legend=false,
 )
 
 # All Methods
@@ -257,6 +265,7 @@ plot5 = plot_objective_gap_convergence(
     records_all, method_names_all, true_min_estimate;
     filename=joinpath(results_folder, experiment_name * "-all-methods-semilogx.pdf"),
     show_reference=false,
+    show_legend=false,
 )
 
 plot6 = plot_objective_gap_convergence(
@@ -264,6 +273,7 @@ plot6 = plot_objective_gap_convergence(
     filename=joinpath(results_folder, experiment_name * "-all-methods-loglog.pdf"),
     xscale_log=true,
     show_reference=false,
+    show_legend=false,
 )
 
 plot7 = plot_objective_gap_convergence(
@@ -272,6 +282,7 @@ plot7 = plot_objective_gap_convergence(
     wallclock=true,
     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time],
     show_reference=false,
+    ylabel="",
 )
 
 all_fastest_time = minimum([rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time])
@@ -282,6 +293,7 @@ plot7_short = plot_objective_gap_convergence(
     wallclock_times=[rpb_total_time, rcbm_total_time, pba_total_time, sgm_total_time],
     show_reference=false,
     max_x=5 * all_fastest_time,
+    ylabel="",
 )
 
 println("\nAll plots generated.")
