@@ -54,17 +54,17 @@ println()
 
 
 # initialize parameters of experiment
-experiment_name = "RCBM-Median-20-Points"
-results_folder = joinpath(@__DIR__, experiment_name)
-!isdir(results_folder) && mkdir(results_folder)
+experiment_name = "RCBM-Median-$N-Points"
+results_folder = joinpath(@__DIR__, "data", "RCBM Median $N Points")
+isdir(results_folder) || mkpath(results_folder)
 seed_argument = 57
 
 atol = 1e-12
-N = 20 # number of data points
+N = 500 # number of data points
 spd_dims = [3, 5, 15, 30, 55]
 
 # Data folder for saving objective gaps (separated from plotting)
-data_folder = joinpath(@__DIR__, "RCBM Median $N Points")
+data_folder = joinpath(@__DIR__, "data", "RCBM Median $N Points")
 isdir(data_folder) || mkpath(data_folder)
 
 function save_record_csv(data_folder, prefix, method_name, record)
@@ -381,7 +381,7 @@ for n in spd_dims
             p0, initial_obj, initial_subgrad;
             max_iter=phase1_maxiter, tolerance=atol,
             proximal_parameter=1.0, trust_parameter=0.1,
-            adaptive_proximal=true, know_minimizer=false, relative_error=false
+            know_minimizer=false, relative_error=false
         )
         run!(rpb_solver_phase1)
         rpb_min_obj = minimum(rpb_solver_phase1.objective_history)
@@ -393,7 +393,7 @@ for n in spd_dims
             p0, initial_obj, initial_subgrad;
             max_iter=phase1_maxiter, tolerance=atol,
             proximal_parameter=1.0, trust_parameter=0.1,
-            adaptive_proximal=true, know_minimizer=false, relative_error=false
+            know_minimizer=false, relative_error=false
         )
         run!(rpb_fo_solver_phase1)
         rpb_fo_min_obj = minimum(rpb_fo_solver_phase1.objective_history)
@@ -489,7 +489,7 @@ for n in spd_dims
             p0, initial_obj, initial_subgrad;
             max_iter=maxiter, tolerance=PHASE2_GAP_TOL,
             proximal_parameter=1.0, trust_parameter=0.1,
-            adaptive_proximal=true, know_minimizer=true, relative_error=false,
+            know_minimizer=true, relative_error=false,
             true_min_obj=true_min_estimate
         )
         rpb_start_time = time()
@@ -516,7 +516,7 @@ for n in spd_dims
             max_iter=maxiter, tolerance=PHASE2_GAP_TOL,
             retraction_error = 1.0, transport_error = 1.0,
             proximal_parameter=1.0, trust_parameter=0.1,
-            adaptive_proximal=true, know_minimizer=true, relative_error=false,
+            know_minimizer=true, relative_error=false,
             true_min_obj=true_min_estimate
         )
         rpb_fo_start_time = time()
@@ -676,7 +676,7 @@ for n in spd_dims
             p0, initial_obj, initial_subgrad;
             max_iter=maxiter, tolerance=atol,
             proximal_parameter=1.0, trust_parameter=0.1,
-            adaptive_proximal=true, know_minimizer=false, relative_error=false
+            know_minimizer=false, relative_error=false
         )
         run!(rpb_solver)
 
@@ -699,7 +699,7 @@ for n in spd_dims
             retraction_error = 1.0, transport_error = 1.0,
             max_iter=maxiter, tolerance=atol,
             proximal_parameter=1.0, trust_parameter=0.1,
-            adaptive_proximal=true, know_minimizer=false, relative_error=false
+            know_minimizer=false, relative_error=false
         )
         run!(rpb_fo_solver)
 
@@ -745,7 +745,7 @@ for n in spd_dims
                 $p0, initial_obj_bm, initial_subgrad_bm;
                 max_iter=$maxiter, tolerance=$atol,
                 proximal_parameter=1.0, trust_parameter=0.1,
-                adaptive_proximal=true, know_minimizer=false, relative_error=false
+                know_minimizer=false, relative_error=false
             )
             run!(rpb_solver_bm)
         end
@@ -761,7 +761,7 @@ for n in spd_dims
                 max_iter=$maxiter, tolerance=$atol,
                 retraction_error = 1.0, transport_error = 1.0,
                 proximal_parameter=1.0, trust_parameter=0.1,
-                adaptive_proximal=true, know_minimizer=false, relative_error=false
+                know_minimizer=false, relative_error=false
             )
             run!(rpb_fo_solver_bm)
         end

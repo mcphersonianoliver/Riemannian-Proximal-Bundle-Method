@@ -8,8 +8,8 @@ N = 20  # number of data points used in experiment
 spd_dims = [3, 5, 15, 30, 55]
 atol = 1e-12
 
-data_folder = joinpath(@__DIR__, "RCBM Median $N Points")
-results_folder = joinpath(@__DIR__, "RCBM Median $N Points Results")
+data_folder = joinpath(@__DIR__, "data", "RCBM Median $N Points")
+results_folder = joinpath(@__DIR__, "plots", "RCBM Median $N Points")
 isdir(results_folder) || mkpath(results_folder)
 
 # --- Load helpers ---
@@ -279,34 +279,31 @@ for n in spd_dims
     time_cutoff_bundles = isempty(nonempty_tr_bundles) ? 1.0 : 5 * minimum(maximum(r[1] for r in tr) for tr in nonempty_tr_bundles)
 
     # --- Generate plots ---
-    for (subset_name, rec, trec, names, iter_cut, time_cut) in [
-        ("", records_all, time_records_all, method_names_all, iter_cutoff_all, time_cutoff_all),
-        ("_nopba", records_nopba, time_records_nopba, method_names_nopba, iter_cutoff_nopba, time_cutoff_nopba),
-        ("_bundles", records_bundles, time_records_bundles, method_names_bundles, iter_cutoff_bundles, time_cutoff_bundles),
+    for (subfolder, rec, trec, names, iter_cut, time_cut) in [
+        ("all_methods", records_all,     time_records_all,     method_names_all,     iter_cutoff_all,     time_cutoff_all),
+        ("no_pba",      records_nopba,   time_records_nopba,   method_names_nopba,   iter_cutoff_nopba,   time_cutoff_nopba),
+        ("bundles_only", records_bundles, time_records_bundles, method_names_bundles, iter_cutoff_bundles, time_cutoff_bundles),
     ]
-        # Oracle calls (offset iterations) - no legend
-        plot_objective_gap_convergence(rec, names, true_min_estimate;
-            filename=joinpath(results_folder, "convergence_gap$(subset_name)_spd_$(n)x$(n).pdf"),
-            offset_iterations=true, ylims_lower=atol, show_legend=false)
-        plot_objective_gap_convergence(rec, names, true_min_estimate;
-            filename=joinpath(results_folder, "convergence_gap$(subset_name)_short_spd_$(n)x$(n).pdf"),
-            offset_iterations=true, ylims_lower=atol, max_x=iter_cut, show_legend=false)
+        for (duration, iter_max, time_max) in [
+            ("long",  nothing,   nothing),
+            ("short", iter_cut,  time_cut),
+        ]
+            dir = joinpath(results_folder, duration, subfolder)
+            isdir(dir) || mkpath(dir)
+            fname = "$(subfolder)_$(duration)_spd_$(n)x$(n).pdf"
 
-        # Semi-log (no offset) - no legend
-        plot_objective_gap_convergence(rec, names, true_min_estimate;
-            filename=joinpath(results_folder, "convergence_semilog$(subset_name)_spd_$(n)x$(n).pdf"),
-            offset_iterations=false, ylims_lower=atol, show_legend=false)
-        plot_objective_gap_convergence(rec, names, true_min_estimate;
-            filename=joinpath(results_folder, "convergence_semilog$(subset_name)_short_spd_$(n)x$(n).pdf"),
-            offset_iterations=false, ylims_lower=atol, max_x=iter_cut, show_legend=false)
+            # Oracle calls (offset iterations)
+            plot_objective_gap_convergence(rec, names, true_min_estimate;
+                filename=joinpath(dir, "convergence_gap_$fname"),
+                offset_iterations=true, ylims_lower=atol, show_legend=false,
+                max_x=iter_max)
 
-        # Wall-clock time - no y-axis title
-        plot_objective_gap_convergence(trec, names, true_min_estimate;
-            filename=joinpath(results_folder, "wallclock_gap$(subset_name)_spd_$(n)x$(n).pdf"),
-            wallclock=true, ylims_lower=atol, ylabel="")
-        plot_objective_gap_convergence(trec, names, true_min_estimate;
-            filename=joinpath(results_folder, "wallclock_gap$(subset_name)_short_spd_$(n)x$(n).pdf"),
-            wallclock=true, ylims_lower=atol, max_x=time_cut, ylabel="")
+            # Wall-clock time
+            plot_objective_gap_convergence(trec, names, true_min_estimate;
+                filename=joinpath(dir, "wallclock_gap_$fname"),
+                wallclock=true, ylims_lower=atol, ylabel="",
+                max_x=time_max)
+        end
     end
 
     println("Plots generated for SPD $n×$n")

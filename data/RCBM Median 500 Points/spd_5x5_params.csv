@@ -1,0 +1,7 @@
+key,value
+true_min_estimate,0.43665536927437076
+N,500.0
+n,5.0
+seed,57.0
+atol,1.0e-12
+maxiter,1000.0

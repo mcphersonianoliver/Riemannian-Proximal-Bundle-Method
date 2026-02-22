@@ -62,13 +62,9 @@ mutable struct RProximalBundle{T <: AbstractFloat}
     relative_error::Bool        # flag for if the error to store should be taken with the initial objective as a denominator
 
     # Storage for two-cut model - setting aside memory
-    model_subg::Vector{Any}                    # s_{k}, initialize together to line-up indexes, dummy entry
-    untransported_subgradients::Vector{Any}    # g_{k}
-    transported_subgradients::Vector{Any}      # ĝ_{k}
     candidate_directions::Vector{Any}          # d_{k}
     candidate_obj_history::Vector{T}     # f(R_x(x_{k}))
     candidate_model_obj_history::Vector{T}  # f_k(d_{k})
-    error_shifts::Vector{T}              # e_{f_k}(ρ_{k})
     proximal_center_history::Vector{Any}       # x_{k}
 
     # Storage for algorithm run
@@ -98,18 +94,12 @@ mutable struct RProximalBundle{T <: AbstractFloat}
                             trust_parameter::T=T(0.1), max_iter::Int=5000, tolerance::T=T(1e-12),
                             max_rho::T=T(1e8), back_tracking_factor::T=T(2.0),
                             know_minimizer::Bool=true, relative_error::Bool=true,
-                            debugging::Bool=false, memory_lite::Bool=false,
-                            adaptive_proximal::Bool=true) where T <: AbstractFloat
-                            # adaptive_proximal kept as kwarg for backward compatibility but is not stored
+                            debugging::Bool=false, memory_lite::Bool=false) where T <: AbstractFloat
 
         # Initialize storage arrays
-        model_subg = [initial_subgradient]
-        untransported_subgradients = [initial_subgradient]
-        transported_subgradients = [initial_subgradient]
         candidate_directions = Any[]
         candidate_obj_history = T[initial_objective]
         candidate_model_obj_history = T[]
-        error_shifts = T[T(0.0)]
         proximal_center_history = [initial_point]
 
         # Initialize history arrays
@@ -140,9 +130,8 @@ mutable struct RProximalBundle{T <: AbstractFloat}
             initial_objective, max_iter, tolerance, trust_parameter,
             initial_subgradient, initial_objective, nothing, T(0.0), nothing, T(0.0),
             know_minimizer, relative_error,
-            model_subg, untransported_subgradients, transported_subgradients,
             candidate_directions, candidate_obj_history, candidate_model_obj_history,
-            error_shifts, proximal_center_history,
+            proximal_center_history,
             proximal_parameter_history, relative_objective_history, objective_history,
             raw_objective_history, true_min_obj,
             indices_of_descent_steps, indices_of_null_steps,
@@ -208,13 +197,6 @@ function run!(rpb::RProximalBundle{T}) where T
             rpb.single_cut = true
             rpb.two_cut = false
 
-            # Update model information - one-cut model now! --- Remove this when cleaning up code ---
-            if !rpb.memory_lite
-                push!(rpb.untransported_subgradients, new_subgradient)  # g_{k+1}
-                push!(rpb.transported_subgradients, transported_new_subgradient)    # no transport is done
-                push!(rpb.error_shifts, T(0.0))  # e_{f_k}(ρ_{k+1}) = 0, no transport is done
-            end
-
             push!(rpb.indices_of_descent_steps, i)
             push!(rpb.proximal_parameter_history, rpb.proximal_parameter)
 
@@ -265,14 +247,6 @@ function run!(rpb::RProximalBundle{T}) where T
                         print("Proximal parameter: $(rpb.proximal_parameter)\n")
                     end
                 end
-            end
-
-            # updates model for two non-anchor cuts --- remove when cleaning up code ---
-            if !rpb.memory_lite
-                push!(rpb.untransported_subgradients, new_subgradient)  # g_{k+1}
-                push!(rpb.transported_subgradients, transported_new_subgradient)   # ĝ_{k+1}
-                push!(rpb.model_subg, -(rpb.proximal_parameter * candidate_direction))                     # s_{k+1}
-                push!(rpb.error_shifts, potential_error_shift)  # conservative shift adjustment
             end
 
             push!(rpb.proximal_parameter_history, rpb.proximal_parameter)
@@ -498,7 +472,7 @@ function compute_three_cut_proximal(rpb::RProximalBundle{T}) where T
         G[3, 1] = G[1, 3]  # Symmetric
         G[3, 2] = G[2, 3]  # Symmetric
         G[3, 3] = inner_product(rpb.manifold, rpb.current_proximal_center, a_3, a_3)
-    catch e
+    catch
         # Fallback: use single-cut proximal direction if Gram matrix construction fails
         return -(rpb.anchor_cut_subg / rpb.proximal_parameter)
     end
@@ -564,7 +538,7 @@ function compute_three_cut_proximal(rpb::RProximalBundle{T}) where T
         if all(x -> x > 1e-9, lam_interior)
             push!(candidates, lam_interior)
         end
-    catch e
+    catch
         # Handle singular matrix if a_i are linearly dependent
     end
 

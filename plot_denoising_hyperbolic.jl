@@ -5,8 +5,8 @@ pgfplotsx()
 
 # --- Load experiment data ---
 experiment_name = "denoising_TV_hyperbolic"
-data_folder = joinpath(@__DIR__, "Denoising TV Hyperbolic Data")
-results_folder = joinpath(@__DIR__, "Denoising TV Hyperbolic Results")
+data_folder = joinpath(@__DIR__, "data", "Denoising TV Hyperbolic")
+results_folder = joinpath(@__DIR__, "plots", "Denoising TV Hyperbolic")
 isdir(results_folder) || mkpath(results_folder)
 
 # Load objective histories
