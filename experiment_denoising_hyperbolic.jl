@@ -23,6 +23,10 @@ inner_product(M, p, v, w) = inner(M, p, v, w)
 # const export_orig   = "--export-orig" in ARGS || get(ENV, "EXPORT_ORIG", "") == "1"
 # const create_gifs   = "--create-gifs" in ARGS || get(ENV, "CREATE_GIFS", "") == "1"
 
+# Set to true to log every QP solve inside RCBM and PBA and print a summary afterwards.
+# Useful for diagnosing bundle pruning issues (e.g., newest cut being discarded every iteration).
+const QP_DIAGNOSTICS = false
+
 # Experiment configuration - Two-phase mode only
 const PHASE1_MULTIPLIER = 1  # Run Phase 1 for this many times the normal iterations
 const PHASE2_GAP_TOL = 1e-8  # Stop Phase 2 when objective gap reaches this tolerance
@@ -560,6 +564,7 @@ function convex_bundle_method_subsolver!(
 
     stats = RipQP.ripqp(qm; display = false)
     λ .= stats.solution
+    QP_DIAGNOSTICS && log_qp_solve!(QP_DIAG, stats, λ, H, d)
     return λ
 end
 
@@ -576,6 +581,7 @@ function proximal_bundle_method_subsolver!(
 
     stats = RipQP.ripqp(qm; display = false)
     λ .= stats.solution
+    QP_DIAGNOSTICS && log_qp_solve!(QP_DIAG, stats, λ, H, d)
     return λ
 end
 
@@ -879,11 +885,13 @@ pba_kwargs_phase2 = [
 
 # Run Phase 2 experiments with detailed timing and QP diagnostics
 println("Running RCBM...")
+QP_DIAGNOSTICS && reset_qp_diagnostics!(QP_DIAG; label="RCBM")
 rcbm_start_time = time()
 rcbm = convex_bundle_method(Hn, f, subgradient_of_f, noise; rcbm_kwargs_phase2...)
 rcbm_end_time = time()
 rcbm_total_time = rcbm_end_time - rcbm_start_time
 print("RCBM total time: $rcbm_total_time seconds\n")
+QP_DIAGNOSTICS && print_qp_diagnostics_summary(QP_DIAG)
 rcbm_result = get_solver_result(rcbm)
 rcbm_record = get_record(rcbm)
 rcbm_record = [initial_entry_no_iterate; rcbm_record]
@@ -891,11 +899,13 @@ save_record_csv(data_folder, experiment_name, "rcbm", rcbm_record)
 rcbm = nothing; rcbm_result = nothing; GC.gc()
 
 println("Running PBA...")
+QP_DIAGNOSTICS && reset_qp_diagnostics!(QP_DIAG; label="PBA")
 pba_start_time = time()
 pba = proximal_bundle_method(Hn, f, subgradient_of_f, noise; pba_kwargs_phase2...)
 pba_end_time = time()
 pba_total_time = pba_end_time - pba_start_time
 print("PBA total time: $pba_total_time seconds\n")
+QP_DIAGNOSTICS && print_qp_diagnostics_summary(QP_DIAG)
 pba_result = get_solver_result(pba)
 pba_record = get_record(pba)
 pba_record = [initial_entry_no_iterate; pba_record]
