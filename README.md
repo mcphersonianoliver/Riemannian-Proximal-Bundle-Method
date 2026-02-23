@@ -186,4 +186,4 @@ When enabled, after each RCBM and PBA run the following summary is printed:
 
 ## References
 
-[1] Ian McPherson and Mert Pilanci, "Convergence Rates for Riemannian Proximal Bundle Methods," 2026.
+[1] Insert Later
