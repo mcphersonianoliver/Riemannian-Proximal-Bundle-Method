@@ -66,7 +66,7 @@ back_tracking_fact = 2 # backtracking factor
 # RPB solver configuration
 rpb_kwargs = (
 true_min_obj = 0.0,
-proximal_parameter = 1.0/num_points,
+proximal_parameter = 1.0,
 trust_parameter = 0.001,
 max_iter = max_iter,
 tolerance = atol,
