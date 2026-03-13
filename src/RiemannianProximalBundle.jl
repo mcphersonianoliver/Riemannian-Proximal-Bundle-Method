@@ -682,6 +682,7 @@ function backtracking_procedure(rpb::RProximalBundle{T}) where T
         current_objective = rpb.compute_objective(rpb.current_proximal_center)
         subgradient_at_candidate = rpb.compute_subgradient(candidate_point)
 
+
         transported_subgradient_from_candidate = rpb.transport_map(candidate_point, rpb.current_proximal_center, subgradient_at_candidate)
         potential_error_shift = compute_shift_adjustment(rpb, subgradient_at_candidate, candidate_point)
 

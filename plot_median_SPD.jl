@@ -4,8 +4,8 @@ using Plots, Plots.PlotMeasures, LaTeXStrings
 pgfplotsx()
 
 # --- Configuration ---
-N = 20  # number of data points used in experiment
-spd_dims = [3, 5, 15, 30, 55]
+N = 20 # number of data points used in experiment
+spd_dims = [55]
 atol = 1e-12
 
 data_folder = joinpath(@__DIR__, "data", "RCBM Median $N Points")
@@ -48,7 +48,6 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
                                        filename=nothing,
                                        show_legend=true,
                                        wallclock=false,
-                                       wallclock_times=nothing,
                                        offset_iterations=false,
                                        ylims_lower=nothing,
                                        max_x=nothing)
@@ -83,7 +82,7 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
         L"\textrm{RCBM-FO}" => "#fe6100",
         L"\textrm{PBA}" => "#dc267f",
         L"\textrm{PBA-FO}" => "#dc267f",
-        L"\textrm{SGM}" => "#ffb000",
+        L"\textrm{SGM (tuned)}" => "#ffb000",
         L"\textrm{SGM-FO}" => "#ffb000",
     )
     fallback_colors = ["#785ef0", "#dc267f", "#fe6100", "#ffb000", "#333333"]
@@ -95,12 +94,12 @@ function plot_objective_gap_convergence(records, method_names, true_min_estimate
         L"\textrm{RCBM-FO}" => :dash,
         L"\textrm{PBA}" => :solid,
         L"\textrm{PBA-FO}" => :dash,
-        L"\textrm{SGM}" => :solid,
+        L"\textrm{SGM (tuned)}" => :solid,
         L"\textrm{SGM-FO}" => :dash,
     )
     fallback_line_styles = [:solid, :dash, :solid, :dash, :solid, :dash, :solid, :dash]
 
-    if wallclock && wallclock_times !== nothing
+    if wallclock
         time_records = records
         max_time_across_all = maximum(
             maximum(r[1] for r in tr) for tr in time_records if !isempty(tr);
@@ -214,7 +213,7 @@ method_names_all = [
     L"\textrm{RPB (Ours)}", L"\textrm{RPB-FO (Ours)}",
     L"\textrm{RCBM}", L"\textrm{RCBM-FO}",
     L"\textrm{PBA}", L"\textrm{PBA-FO}",
-    L"\textrm{SGM}", L"\textrm{SGM-FO}",
+    L"\textrm{SGM (tuned)}", L"\textrm{SGM-FO}",
 ]
 
 for n in spd_dims
@@ -266,9 +265,9 @@ for n in spd_dims
     nonempty_records_nopba = [r for r in records_nopba if !isempty(r)]
     nonempty_records_bundles = [r for r in records_bundles if !isempty(r)]
 
-    iter_cutoff_all = isempty(nonempty_records_all) ? 100 : 5 * minimum(length(r) for r in nonempty_records_all)
-    iter_cutoff_nopba = isempty(nonempty_records_nopba) ? 100 : 5 * minimum(length(r) for r in nonempty_records_nopba)
-    iter_cutoff_bundles = isempty(nonempty_records_bundles) ? 100 : 5 * minimum(length(r) for r in nonempty_records_bundles)
+    iter_cutoff_all = isempty(nonempty_records_all) ? 100 : 4 * minimum(length(r) for r in nonempty_records_all)
+    iter_cutoff_nopba = isempty(nonempty_records_nopba) ? 100 : 4 * minimum(length(r) for r in nonempty_records_nopba)
+    iter_cutoff_bundles = isempty(nonempty_records_bundles) ? 100 : 4 * minimum(length(r) for r in nonempty_records_bundles)
 
     nonempty_tr_all = [tr for tr in time_records_all if !isempty(tr)]
     nonempty_tr_nopba = [tr for tr in time_records_nopba if !isempty(tr)]
@@ -286,7 +285,7 @@ for n in spd_dims
     ]
         for (duration, iter_max, time_max) in [
             ("long",  nothing,   nothing),
-            ("short", iter_cut,  time_cut),
+            ("short", 40,        time_cut),
         ]
             dir = joinpath(results_folder, duration, subfolder)
             isdir(dir) || mkpath(dir)

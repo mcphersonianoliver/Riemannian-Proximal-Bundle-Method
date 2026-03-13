@@ -52,6 +52,8 @@ if TWO_PHASE_MODE
 end
 println()
 
+atol = 1e-12
+N = 20 # number of data points
 
 # initialize parameters of experiment
 experiment_name = "RCBM-Median-$N-Points"
@@ -59,9 +61,7 @@ results_folder = joinpath(@__DIR__, "data", "RCBM Median $N Points")
 isdir(results_folder) || mkpath(results_folder)
 seed_argument = 57
 
-atol = 1e-12
-N = 500 # number of data points
-spd_dims = [3, 5, 15, 30, 55]
+spd_dims = [55]
 
 # Data folder for saving objective gaps (separated from plotting)
 data_folder = joinpath(@__DIR__, "data", "RCBM Median $N Points")
@@ -142,14 +142,45 @@ sgm_kwargs = [
     :debug => [:Iteration, (:Cost, "F(p): %1.16f "), :Stop, 1000, "\n"],
     :record => [:Iteration, :Cost, :Iterate],
     :return_state => true,
-    :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
+    :stepsize => DecreasingLength(; exponent=0.0, factor=0.99, subtrahend=0.0, length=1.0, shift=1.0, type=:relative),
     :stopping_criterion => StopWhenSubgradientNormLess(√atol) | StopAfterIteration(maxiter),
 ]
 sgm_bm_kwargs = [
     :cache => (:LRU, [:Cost, :SubGradient], 50),
-    :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
+    :stepsize => DecreasingLength(; exponent=0.0, factor=0.99, subtrahend=0.0, length=1.0, shift=1.0, type=:relative),
     :stopping_criterion => StopWhenSubgradientNormLess(√atol) | StopAfterIteration(maxiter),
 ]
+
+# Bare SGM loop with absolute stepsize α_k = C * factor^k (k=1,2,...), no Manopt overhead.
+# k starts at 1 to match Manopt's DecreasingLength convention.
+# Tracks best iterate so SGM's non-monotone behaviour doesn't prevent convergence detection.
+function run_sgm_bare(M, f, ∂f, p, retraction_method;
+                      C::Float64=1.0,
+                      factor::Float64=0.6,
+                      maxiter::Int=1000,
+                      stop_threshold::Union{Float64,Nothing}=nothing)
+    q      = similar(p)
+    obj    = f(M, p)
+    best_obj = obj
+    records = Tuple{Int,Float64}[(0, obj)]
+    sizehint!(records, maxiter + 1)
+    α_k = C * factor  # k=1 on first step, matching Manopt convention
+    for k in 1:maxiter
+        X = ∂f(M, p)
+        retract!(M, q, p, -α_k * X, retraction_method)
+        copyto!(p, q)
+        obj = f(M, p)
+        if obj < best_obj
+            best_obj = obj
+        end
+        push!(records, (k, obj))
+        if stop_threshold !== nothing && best_obj ≤ stop_threshold
+            break
+        end
+        α_k *= factor
+    end
+    return records
+end
 
 # Initialize dataframes for results
 global col_names_1 = [
@@ -288,7 +319,7 @@ for n in spd_dims
     ∂f_spd(M, p) = ∂f(M, p, data_spd, atol)
 
     initial_obj_spd = f_spd(M, p0)
-    initial_entry = (0, initial_obj_spd, p0)
+    initial_entry = (0, initial_obj_spd)
 
     # Set up manifold-specific functions for RPB
     function retraction_exp(x, v)
@@ -358,7 +389,7 @@ for n in spd_dims
             :debug => [:Iteration, (:Cost, "F(p): %1.16f "), :Stop, 1000, "\n"],
             :record => [:Iteration, :Cost, :Iterate],
             :return_state => true,
-            :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
+            :stepsize => DecreasingLength(; exponent=0.0, factor=0.99, subtrahend=0.0, length=1.0, shift=1.0, type=:relative),
             :stopping_criterion => StopWhenSubgradientNormLess(√atol) | StopAfterIteration(phase1_maxiter),
         ]
 
@@ -412,37 +443,48 @@ for n in spd_dims
         # Phase 2 stopping criterion: stop when objective gap is small enough
         gap_stopping_criterion = StopWhenCostLess(true_min_estimate + PHASE2_GAP_TOL)
 
+        # --- SGM grid search (commented out — best params found: C=2.0, q=0.95, type=:relative) ---
+        # println("--- SGM grid search ---")
+        # gs_C_values = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+        # gs_q_values = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+        # gs_maxiter  = 500
+        # sgm_best_C = 1.0; sgm_best_q = 0.99; sgm_best_iters = maxiter + 1
+        # println(rpad("C", 8) * rpad("q", 7) * rpad("iters", 7) * rpad("wc(s)", 10) * "status")
+        # for gs_C in gs_C_values, gs_q in gs_q_values
+        #     t0 = time()
+        #     gs_sgm = subgradient_method(M, f_spd, ∂f_spd, p0;
+        #         cache=(:LRU, [:Cost], 50), record=[:Cost], return_state=true,
+        #         stepsize=DecreasingLength(; exponent=0.0, factor=gs_q, subtrahend=0.0,
+        #             length=gs_C, shift=1.0, type=:relative),
+        #         stopping_criterion=gap_stopping_criterion | StopAfterIteration(gs_maxiter))
+        #     gs_wc = time() - t0
+        #     gs_record = get_record(gs_sgm)
+        #     gs_iters = length(gs_record)
+        #     gs_obj = isempty(gs_record) ? Inf : minimum(gs_record)
+        #     gs_conv = gs_obj ≤ true_min_estimate + PHASE2_GAP_TOL
+        #     println(rpad(gs_C,8)*rpad(gs_q,7)*rpad(gs_iters,7)*rpad(round(gs_wc,digits=3),10)*(gs_conv ? "OK" : "no cvg"))
+        #     if gs_conv && gs_iters < sgm_best_iters; sgm_best_iters=gs_iters; sgm_best_C=gs_C; sgm_best_q=gs_q; end
+        #     gs_record = nothing; gs_sgm = nothing; GC.gc()
+        # end
+        # println("Best params: C=$(sgm_best_C), q=$(sgm_best_q) → $(sgm_best_iters) iters")
+
         # Phase 2 solver configurations
         rcbm_kwargs_phase2 = [
-            :cache => (:LRU, [:Cost, :SubGradient], 50),
-            :count => [:Cost, :SubGradient],
+            :cache => (:LRU, [:Cost], 50),
             :domain => domf_spd,
-            :debug => [:Iteration, (:Cost, "F(p): %1.16f "), (:ξ, "ξ: %1.8f "), (:last_stepsize, "step size: %1.8f"), :Stop, 1000, "\n"],
             :diameter => diameter_spd,
             :k_max => k_max_spd,
             :k_min => k_min_spd,
-            :record => [:Iteration, :Cost, :Iterate],
+            :record => [:Iteration, :Cost],
             :return_state => true,
             :stopping_criterion => gap_stopping_criterion | StopAfterIteration(maxiter),
         ]
 
         pba_kwargs_phase2 = [
-            :cache => (:LRU, [:Cost, :SubGradient], 50),
-            :count => [:Cost, :SubGradient],
-            :debug => [:Iteration, (:Cost, "F(p): %1.16f "), (:ν, "ν: %1.16f "), (:c, "c: %1.16f "), (:μ, "μ: %1.8f "), :Stop, 1000, "\n"],
-            :record => [:Iteration, :Cost, :Iterate],
+            :cache => (:LRU, [:Cost], 50),
+            :record => [:Iteration, :Cost],
             :return_state => true,
-            :stopping_criterion => (StopWhenLagrangeMultiplierLess(atol) | gap_stopping_criterion | StopAfterIteration(maxiter)),
-        ]
-
-        sgm_kwargs_phase2 = [
-            :cache => (:LRU, [:Cost, :SubGradient], 50),
-            :count => [:Cost, :SubGradient],
-            :debug => [:Iteration, (:Cost, "F(p): %1.16f "), :Stop, 1000, "\n"],
-            :record => [:Iteration, :Cost, :Iterate],
-            :return_state => true,
-            :stepsize => DecreasingLength(; exponent=1, factor=1, subtrahend=0, length=1, shift=0, type=:absolute),
-            :stopping_criterion => (StopWhenSubgradientNormLess(√atol) | gap_stopping_criterion | StopAfterIteration(maxiter)),
+            :stopping_criterion => (gap_stopping_criterion | StopAfterIteration(maxiter)),
         ]
 
         # Run Phase 2 methods with timing
@@ -454,14 +496,6 @@ for n in spd_dims
         rcbm_record_raw = get_record(rcbm)
         rcbm_record = vcat([initial_entry], rcbm_record_raw)
 
-        # Create time-based record for RCBM
-        rcbm_times = [0.0]  # Start at time 0
-        rcbm_time_step = (rcbm_end_time - rcbm_start_time) / length(rcbm_record_raw)
-        for i in 1:length(rcbm_record_raw)
-            push!(rcbm_times, i * rcbm_time_step)
-        end
-        rcbm_time_record = [(rcbm_times[i], rcbm_record[i][2]) for i in 1:length(rcbm_record)]
-
         println("Phase 2: PBA")
         pba_start_time = time()
         pba = proximal_bundle_method(M, f_spd, ∂f_spd, p0; pba_kwargs_phase2...)
@@ -470,19 +504,11 @@ for n in spd_dims
         pba_record_raw = get_record(pba)
         pba_record = vcat([initial_entry], pba_record_raw)
 
-        # Create time-based record for PBA
-        pba_times = [0.0]  # Start at time 0
-        pba_time_step = (pba_end_time - pba_start_time) / length(pba_record_raw)
-        for i in 1:length(pba_record_raw)
-            push!(pba_times, i * pba_time_step)
-        end
-        pba_time_record = [(pba_times[i], pba_record[i][2]) for i in 1:length(pba_record)]
-
         println("Phase 2: RPB (Exponential)")
+        # Include initial oracle evaluations in timing (same as SGM which computes f(p0) inside run_sgm_bare)
+        rpb_start_time = time()
         initial_obj = f_spd(M, p0)
         initial_subgrad = ∂f_spd(M, p0)
-
-        # RPB with gap tolerance as stopping criterion
         rpb_solver = RProximalBundle(
             M, retraction_exp, transport_exp,
             (x) -> f_spd(M, x), (x) -> ∂f_spd(M, x),
@@ -492,7 +518,6 @@ for n in spd_dims
             know_minimizer=true, relative_error=false,
             true_min_obj=true_min_estimate
         )
-        rpb_start_time = time()
         run!(rpb_solver)
         rpb_end_time = time()
 
@@ -502,24 +527,20 @@ for n in spd_dims
         rpb_objectives = rpb_solver.raw_objective_history
         rpb_record = [(iter, obj) for (iter, obj) in zip(rpb_iterations, rpb_objectives)]
 
-        # Create time-based record for RPB
-        rpb_total_time = rpb_end_time - rpb_start_time
-        rpb_time_step = rpb_total_time / (length(rpb_solver.raw_objective_history) - 1)
-        rpb_time_record = [(i * rpb_time_step, rpb_solver.raw_objective_history[i+1]) for i in 0:length(rpb_solver.raw_objective_history)-1]
-
         println("Phase 2: RPB (First-Order + Projection)")
-        # RPB with first-order retraction and projection transport
+        rpb_fo_start_time = time()
+        initial_obj_fo = f_spd(M, p0)
+        initial_subgrad_fo = ∂f_spd(M, p0)
         rpb_fo_solver = RProximalBundle(
             M, retraction_first_order, transport_projection,
             (x) -> f_spd(M, x), (x) -> ∂f_spd(M, x),
-            p0, initial_obj, initial_subgrad;
+            p0, initial_obj_fo, initial_subgrad_fo;
             max_iter=maxiter, tolerance=PHASE2_GAP_TOL,
             retraction_error = 1.0, transport_error = 1.0,
             proximal_parameter=1.0, trust_parameter=0.1,
             know_minimizer=true, relative_error=false,
             true_min_obj=true_min_estimate
         )
-        rpb_fo_start_time = time()
         run!(rpb_fo_solver)
         rpb_fo_end_time = time()
 
@@ -528,26 +549,21 @@ for n in spd_dims
         rpb_fo_objectives = rpb_fo_solver.raw_objective_history
         rpb_fo_record = [(iter, obj) for (iter, obj) in zip(rpb_fo_iterations, rpb_fo_objectives)]
 
-        # Create time-based record for RPB first-order
-        rpb_fo_total_time = rpb_fo_end_time - rpb_fo_start_time
-        rpb_fo_time_step = rpb_fo_total_time / (length(rpb_fo_solver.raw_objective_history) - 1)
-        rpb_fo_time_record = [(i * rpb_fo_time_step, rpb_fo_solver.raw_objective_history[i+1]) for i in 0:length(rpb_fo_solver.raw_objective_history)-1]
-
         println("Phase 2: SGM")
         sgm_start_time = time()
-        sgm = subgradient_method(M, f_spd, ∂f_spd, p0; sgm_kwargs_phase2...)
+        sgm_record = run_sgm_bare(M, f_spd, ∂f_spd, deepcopy(p0), ExponentialRetraction();
+            C=2.0, factor=0.95, maxiter=maxiter,
+            stop_threshold=true_min_estimate + PHASE2_GAP_TOL)
         sgm_end_time = time()
-        sgm_result = get_solver_result(sgm)
-        sgm_record_raw = get_record(sgm)
-        sgm_record = vcat([initial_entry], sgm_record_raw)
-
-        # Create time-based record for SGM
-        sgm_times = [0.0]  # Start at time 0
-        sgm_time_step = (time() - sgm_start_time) / length(sgm_record_raw)
-        for i in 1:length(sgm_record_raw)
-            push!(sgm_times, i * sgm_time_step)
-        end
-        sgm_time_record = [(sgm_times[i], sgm_record[i][2]) for i in 1:length(sgm_record)]
+        # --- Manopt SGM (commented out for comparison) ---
+        # sgm_manopt = subgradient_method(M, f_spd, ∂f_spd, p0;
+        #     cache=(:LRU, [:Cost], 50),
+        #     record=[:Iteration, :Cost],
+        #     return_state=true,
+        #     stepsize=DecreasingLength(; exponent=0.0, factor=0.95, subtrahend=0.0,
+        #         length=2.0, shift=1.0, type=:relative),
+        #     stopping_criterion=gap_stopping_criterion | StopAfterIteration(maxiter))
+        # sgm_record = vcat([initial_entry], get_record(sgm_manopt))
 
         # --- First-order retraction Phase 2 runs ---
         println("Phase 2: RCBM-FO")
@@ -559,14 +575,6 @@ for n in spd_dims
         rcbm_fo_record_raw = get_record(rcbm_fo)
         rcbm_fo_record = vcat([initial_entry], rcbm_fo_record_raw)
 
-        # Create time-based record for RCBM-FO
-        rcbm_fo_times = [0.0]
-        rcbm_fo_time_step = (rcbm_fo_end_time - rcbm_fo_start_time) / length(rcbm_fo_record_raw)
-        for i in 1:length(rcbm_fo_record_raw)
-            push!(rcbm_fo_times, i * rcbm_fo_time_step)
-        end
-        rcbm_fo_time_record = [(rcbm_fo_times[i], rcbm_fo_record[i][2]) for i in 1:length(rcbm_fo_record)]
-
         println("Phase 2: PBA-FO")
         pba_fo_start_time = time()
         pba_fo = proximal_bundle_method(M, f_spd, ∂f_spd, p0; pba_kwargs_phase2...,
@@ -576,30 +584,22 @@ for n in spd_dims
         pba_fo_record_raw = get_record(pba_fo)
         pba_fo_record = vcat([initial_entry], pba_fo_record_raw)
 
-        # Create time-based record for PBA-FO
-        pba_fo_times = [0.0]
-        pba_fo_time_step = (pba_fo_end_time - pba_fo_start_time) / length(pba_fo_record_raw)
-        for i in 1:length(pba_fo_record_raw)
-            push!(pba_fo_times, i * pba_fo_time_step)
-        end
-        pba_fo_time_record = [(pba_fo_times[i], pba_fo_record[i][2]) for i in 1:length(pba_fo_record)]
-
         println("Phase 2: SGM-FO")
         sgm_fo_start_time = time()
-        sgm_fo = subgradient_method(M, f_spd, ∂f_spd, p0; sgm_kwargs_phase2...,
-            retraction_method=FirstOrderSPDRetraction())
+        sgm_fo_record = run_sgm_bare(M, f_spd, ∂f_spd, deepcopy(p0), FirstOrderSPDRetraction();
+            C=2.0, factor=0.95, maxiter=maxiter,
+            stop_threshold=true_min_estimate + PHASE2_GAP_TOL)
         sgm_fo_end_time = time()
-        sgm_fo_result = get_solver_result(sgm_fo)
-        sgm_fo_record_raw = get_record(sgm_fo)
-        sgm_fo_record = vcat([initial_entry], sgm_fo_record_raw)
-
-        # Create time-based record for SGM-FO
-        sgm_fo_times = [0.0]
-        sgm_fo_time_step = (sgm_fo_end_time - sgm_fo_start_time) / length(sgm_fo_record_raw)
-        for i in 1:length(sgm_fo_record_raw)
-            push!(sgm_fo_times, i * sgm_fo_time_step)
-        end
-        sgm_fo_time_record = [(sgm_fo_times[i], sgm_fo_record[i][2]) for i in 1:length(sgm_fo_record)]
+        # --- Manopt SGM-FO (commented out for comparison) ---
+        # sgm_fo_manopt = subgradient_method(M, f_spd, ∂f_spd, p0;
+        #     cache=(:LRU, [:Cost], 50),
+        #     record=[:Iteration, :Cost],
+        #     return_state=true,
+        #     stepsize=DecreasingLength(; exponent=0.0, factor=0.95, subtrahend=0.0,
+        #         length=2.0, shift=1.0, type=:relative),
+        #     retraction_method=FirstOrderSPDRetraction(),
+        #     stopping_criterion=gap_stopping_criterion | StopAfterIteration(maxiter))
+        # sgm_fo_record = vcat([initial_entry], get_record(sgm_fo_manopt))
 
         println("Phase 2 complete. SPD dimension $n")
 
@@ -646,7 +646,7 @@ for n in spd_dims
         rpb_solver_phase1 = nothing; rpb_fo_solver_phase1 = nothing
         rcbm = nothing; rcbm_fo = nothing
         pba = nothing; pba_fo = nothing; pba_phase1 = nothing
-        sgm = nothing; sgm_fo = nothing; sgm_phase1 = nothing
+        sgm_record = nothing; sgm_fo_record = nothing; sgm_phase1 = nothing
         GC.gc()
 
     else
