@@ -555,7 +555,7 @@ for n in spd_dims
             C=2.0, factor=0.95, maxiter=maxiter,
             stop_threshold=true_min_estimate + PHASE2_GAP_TOL)
         sgm_end_time = time()
-        # --- Manopt SGM (commented out for comparison) ---
+        # --- Manopt SGM (commented out because overhead due to Manopt implementation effected wall-clock times) ---
         # sgm_manopt = subgradient_method(M, f_spd, ∂f_spd, p0;
         #     cache=(:LRU, [:Cost], 50),
         #     record=[:Iteration, :Cost],
